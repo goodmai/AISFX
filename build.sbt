@@ -8,7 +8,8 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       // ScalaFX
       "org.scalafx" %% "scalafx" % "20.0.0-R31",
-
+//      "org.slf4j" % "slf4j-simple" % "2.0.16",
+      "ch.qos.logback" % "logback-classic" % "1.5.11",
       // Pekko
       "org.apache.pekko" %% "pekko-actor-typed" % "1.1.0",
       "org.apache.pekko" %% "pekko-slf4j" % "1.1.0",
@@ -22,7 +23,8 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.client3" %% "core" % "3.10.1",
       "com.softwaremill.sttp.client3" %% "pekko-http-backend" % "3.10.1",
       "com.softwaremill.sttp.client3" %% "circe" % "3.10.1",
-
+      //scalatest
+      "org.scalatest" %% "scalatest" % "3.2.19" % "test",
       // circe
       "io.circe" %% "circe-core" % "0.14.7",
       "io.circe" %% "circe-generic" % "0.14.7",

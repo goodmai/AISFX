@@ -1,164 +1,286 @@
 package com.aiplatform.service
 
-import org.apache.pekko.actor.ActorSystem
+import org.apache.pekko.actor.ActorSystem // Используем classic ActorSystem для Pekko HTTP
 import sttp.client3._
 import sttp.client3.circe._
 import sttp.client3.pekkohttp.PekkoHttpBackend
-import io.circe.generic.auto._
+import io.circe.{Encoder, Json, JsonObject}
+import io.circe.generic.auto._ // Для автоматической генерации Encoder/Decoder для case классов
 import io.circe.syntax._
 import io.circe.parser.parse
 import sttp.model.{StatusCode, Uri}
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Try // Добавлен импорт Try
+import scala.util.Try
+import scala.util.control.NonFatal // <<< --- Импорт NonFatal --- <<<
+import org.slf4j.LoggerFactory
+import com.aiplatform.model.Dialog // Импортируем модель Dialog для использования в истории
 
-// Обновленные case-классы для точного соответствия API Gemini
+// --- Модели данных для взаимодействия с Gemini API ---
+
+// Часть контента (обычно текст)
 case class Part(text: String)
+
+// Контент запроса или ответа, содержит части и роль (user или model)
 case class Content(parts: List[Part], role: Option[String] = None)
-case class GenerateContentRequest(contents: List[Content])
-case class Candidate(content: Content)
-case class UsageMetadata(
+
+// Конфигурация генерации (температура, topP, topK)
+case class GenerationConfig(
+                             temperature: Option[Double] = None,
+                             topP: Option[Double] = None,
+                             topK: Option[Int] = None
+                           )
+
+// Основной объект запроса к API
+case class GenerateContentRequest(
+                                   contents: List[Content], // Список ходов диалога (история + текущий запрос)
+                                   generationConfig: Option[GenerationConfig] = None // Настройки генерации
+                                 )
+
+// Компаньон-объект для GenerateContentRequest для кастомного Encoder'а
+object GenerateContentRequest {
+  // Неявный Encoder для преобразования GenerateContentRequest в JSON
+  implicit val encoder: Encoder[GenerateContentRequest] = (req: GenerateContentRequest) => {
+    // Базовый JSON с полем "contents"
+    val baseJson = Json.obj(
+      "contents" -> req.contents.asJson
+    )
+    // Обрабатываем опциональный generationConfig
+    val configJson = req.generationConfig.flatMap { config =>
+      // Собираем поля конфигурации, только если они заданы (не None)
+      val configFields = List(
+        config.temperature.map("temperature" -> Json.fromDoubleOrNull(_)),
+        config.topP.map("topP" -> Json.fromDoubleOrNull(_)),
+        config.topK.map("topK" -> Json.fromInt(_))
+      ).flatten // Убираем None опции
+      // Если есть хотя бы одно поле, создаем JsonObject
+      if (configFields.isEmpty) None else Some(JsonObject.fromIterable(configFields))
+    }
+
+    // Добавляем generationConfig в JSON, если он не пустой
+    configJson match {
+      case Some(cfgObj) => baseJson.deepMerge(Json.obj("generationConfig" -> Json.fromJsonObject(cfgObj)))
+      case None => baseJson // Возвращаем базовый JSON, если конфиг пуст
+    }
+  }
+}
+
+// Модели для разбора ответа API
+case class Candidate(content: Content) // Кандидат на ответ
+case class UsageMetadata( // Метаданные об использовании токенов
                           promptTokenCount: Int,
                           candidatesTokenCount: Int,
                           totalTokenCount: Int
                         )
-case class ErrorDetails(
-                         code: Int,
-                         message: String,
-                         status: String
-                       )
-// Добавлен корневой класс для парсинга ошибок API Gemini
-case class GeminiApiError(error: ErrorDetails)
-
-case class GenerateContentResponse(
+case class ErrorDetails(code: Int, message: String, status: String) // Детали ошибки от API
+case class GeminiApiError(error: ErrorDetails) // Структура ошибки API
+case class GenerateContentResponse( // Основной объект ответа API
                                     candidates: Option[List[Candidate]] = None,
                                     usageMetadata: Option[UsageMetadata] = None
-                                    // Убрано поле error, так как ошибки обрабатываются через ResponseException
-                                    // или парсингом тела ошибки при HttpError
                                   )
+// --- ------------------------------------ ---
 
-class AIService(apiKey: String)(implicit classicSystem: ActorSystem) {
-  // Псевдоним для сложного типа ответа для улучшения читаемости
+/**
+ * Сервис для взаимодействия с Google Generative AI API (Gemini).
+ * Отправляет запросы на генерацию контента и обрабатывает ответы.
+ * @param classicSystem Неявный параметр ActorSystem (классический) для Pekko HTTP бэкенда.
+ */
+class AIService(implicit classicSystem: ActorSystem) { // Требует classic ActorSystem
+  private val logger = LoggerFactory.getLogger(getClass) // Логгер
+  // Тип для результата запроса sttp: либо ошибка, либо успешный GenerateContentResponse
   type ApiResponse = Either[ResponseException[String, io.circe.Error], GenerateContentResponse]
-
-  // Используем PekkoHttpBackend напрямую, т.к. usingActorSystem может быть deprecated или измениться
+  // HTTP бэкенд на основе Pekko HTTP для отправки запросов
   private implicit val backend: SttpBackend[Future, Any] = PekkoHttpBackend.usingActorSystem(classicSystem)
 
-  private val baseUri = "https://generativelanguage.googleapis.com/v1beta/models/"
-  @volatile private var currentModel = "gemini-1.5-flash-latest"
+  private val baseUri = "https://generativelanguage.googleapis.com/v1beta/models/" // Базовый URL Gemini API
+  @volatile private var currentModel = "gemini-1.5-flash-latest" // Модель по умолчанию (может изменяться через updateModel)
 
-  // Основной метод обработки запроса
-  def process(prompt: String)(implicit ec: ExecutionContext): Future[String] = {
-    val request = buildRequest(prompt)
+  /**
+   * Основной метод для обработки запроса пользователя к AI.
+   * Включает историю диалога для контекста.
+   */
+  def process(
+               prompt: String, // Текущий текст запроса от пользователя
+               apiKey: String, // API ключ
+               temperature: Option[Double], // Настройки генерации
+               topP: Option[Double],
+               topK: Option[Int],
+               history: List[Dialog] // История предыдущих диалогов для контекста
+             )(implicit ec: ExecutionContext): Future[String] = { // Требует ExecutionContext для Future
 
+    // Проверка наличия API ключа
+    if (apiKey.trim.isEmpty) {
+      logger.error("API Key is empty. Cannot process request.")
+      // Возвращаем Future.failed, если ключа нет
+      return Future.failed(new IllegalArgumentException("API Key is required but was empty."))
+    }
+
+    // Формирование объекта конфигурации генерации
+    val genConfig = GenerationConfig(temperature = temperature, topP = topP, topK = topK)
+    // Передаем конфиг, только если в нем есть хотя бы один параметр
+    val effectiveGenConfig = if (genConfig.temperature.isEmpty && genConfig.topP.isEmpty && genConfig.topK.isEmpty) None else Some(genConfig)
+
+    logger.debug(s"Processing AI request. History size: ${history.size}, Model: $currentModel, Temp: $temperature, TopP: $topP, TopK: $topK")
+
+    // Создание HTTP запроса
+    val request: Request[ApiResponse, Any] = buildRequest(prompt, apiKey, effectiveGenConfig, history)
+
+    // Асинхронная отправка запроса и обработка результата
     sendRequest(request) // Отправляем запрос
-      .flatMap(handleResponse) // Обрабатываем ответ Future
-      .recoverWith(handleExceptions) // Обрабатываем другие исключения Future
+      .flatMap(handleResponse) // Обрабатываем успешный ответ
+      .recoverWith(handleExceptions) // Обрабатываем любые исключения (сеть, таймауты, ошибки API)
   }
 
-  // Построение HTTP-запроса
-  // Исправлена сигнатура: добавлен параметр R=Any
-  private def buildRequest(prompt: String): Request[ApiResponse, Any] = {
-    val payload = GenerateContentRequest(List(
-      Content(parts = List(Part(prompt)), role = Some("user"))
-    ))
+  /**
+   * Вспомогательный метод для создания объекта HTTP запроса sttp.
+   * Формирует JSON тело запроса с учетом истории и настроек.
+   */
+  private def buildRequest(
+                            prompt: String,
+                            apiKey: String,
+                            genConfig: Option[GenerationConfig],
+                            history: List[Dialog]
+                          ): Request[ApiResponse, Any] = {
 
-    basicRequest
-      .post(Uri.unsafeParse(s"$baseUri$currentModel:generateContent?key=$apiKey"))
-      .contentType("application/json")
-      .body(payload.asJson.noSpaces)
-      // Указываем, как парить ответ: JSON в GenerateContentResponse
-      // Ошибки парсинга или HTTP ошибки будут обернуты в Either
-      .response(asJson[GenerateContentResponse])
+    // Преобразование истории (List[Dialog]) в формат List[Content] для API
+    val historyContents: List[Content] = history.flatMap { dialog =>
+      // Каждый Dialog разворачивается в пару Content: запрос пользователя и ответ модели
+      List(
+        Content(parts = List(Part(dialog.request)), role = Some("user")), // Запрос пользователя
+        Content(parts = List(Part(dialog.response)), role = Some("model")) // Ответ модели
+      )
+      // Ограничиваем количество передаваемых сообщений истории (например, последние 10 диалогов = 20 сообщений)
+      // Это важно для соблюдения лимитов API по размеру запроса/количеству токенов
+    }.takeRight(20)
+
+    // Добавляем текущий запрос пользователя как последний элемент 'user'
+    val currentContent = Content(parts = List(Part(prompt)), role = Some("user"))
+    // Объединяем историю и текущий запрос в один список
+    val allContents = historyContents :+ currentContent
+
+    // Создаем объект тела запроса GenerateContentRequest
+    val payload = GenerateContentRequest(
+      contents = allContents,
+      generationConfig = genConfig // Добавляем настройки генерации, если они есть
+    )
+
+    // Формируем полный URL для запроса к API
+    val targetUri = Uri.unsafeParse(s"$baseUri$currentModel:generateContent?key=$apiKey")
+
+    // Логирование (исправленное): показываем начало первого и последнего сообщения
+    val firstPartText = payload.contents.headOption.flatMap(_.parts.headOption).map(_.text.take(50)).getOrElse("Empty")
+    val lastPartText = payload.contents.lastOption.flatMap(_.parts.headOption).map(_.text.take(50)).getOrElse("")
+    logger.trace("Request Payload Contents Preview (first/last part): {}...{}", firstPartText, lastPartText)
+
+    // Создаем и возвращаем объект запроса sttp
+    basicRequest // Используем базовый запрос sttp
+      .post(targetUri) // Метод POST и URL
+      .contentType("application/json") // Заголовок Content-Type
+      .body(payload) // Тело запроса (автоматически сериализуется в JSON)
+      .response(asJson[GenerateContentResponse]) // Ожидаем ответ как JSON, десериализуемый в GenerateContentResponse
   }
 
-  // Отправка запроса и обработка ответа
-  // Исправлены типы параметра request и возвращаемого значения
-  private def sendRequest(
-                           request: Request[ApiResponse, Any]
-                         ): Future[Response[ApiResponse]] = {
-    request.send(backend)
-  }
-
-  // Обработка успешного или неуспешного ответа (уровень HTTP и десериализации)
-  // Используем ApiResponse в сигнатуре
-  private def handleResponse(response: Response[ApiResponse])(implicit ec: ExecutionContext): Future[String] = {
-    response.body match {
-      // Успешная десериализация в GenerateContentResponse
-      case Right(apiResponse) =>
-        apiResponse.candidates match {
-          // Есть кандидаты, берем первого
-          case Some(candidate :: _) =>
-            extractAnswer(candidate.content) // Возвращает Future[String]
-          // Кандидатов нет или список пуст
-          case Some(Nil) | None =>
-            Future.failed(new Exception("No candidates found in response"))
-          // Поле candidates отсутствует (хотя case класс определяет его как Option)
-          // Этот случай покрывается предыдущим, но оставим для ясности
-          // case None =>
-          //   Future.failed(new Exception("Candidates field missing in response"))
-        }
-      // Ошибка HTTP или десериализации
-      case Left(error) =>
-        handleErrorResponse(error) // Возвращает Future.failed(...)
-    }
-  }
-
-  // Извлечение текста ответа из первого Part
-  private def extractAnswer(content: Content): Future[String] = content.parts match {
-    case head :: _ => Future.successful(head.text)
-    case _ => Future.failed(new Exception("Empty response content parts")) // Более точное сообщение
-  }
-
-  // Обработка ошибок типа ResponseException (HttpError, DeserializationException)
-  // Возвращает Future[String], но всегда неуспешный (failed)
-  private def handleErrorResponse(error: ResponseException[String, io.circe.Error]): Future[String] = error match {
-    case HttpError(body, statusCode) =>
-      Future.failed(new Exception(s"HTTP Error $statusCode: ${extractErrorMessage(body, statusCode)}"))
-    case DeserializationException(body, error) =>
-      Future.failed(new Exception(s"Deserialization Error: ${error.getMessage}. Original body: $body"))
-  }
-
-  // Извлечение сообщения об ошибке из тела ответа (улучшено)
-  // Добавлен параметр statusCode для контекста
-  private def extractErrorMessage(body: String, statusCode: StatusCode): String = {
-    // Попытка 1: Парсим как GeminiApiError
-    val attempt1: Either[io.circe.Error, String] = parse(body)
-      .flatMap(_.as[GeminiApiError])
-      .map(geminiError => s"${geminiError.error.message} (code: ${geminiError.error.code}, status: ${geminiError.error.status})")
-
-    // Попытка 2: Парсим напрямую как ErrorDetails
-    lazy val attempt2: Either[io.circe.Error, String] = parse(body)
-      .flatMap(_.as[ErrorDetails])
-      .map(details => s"${details.message} (code: ${details.code}, status: ${details.status})")
-
-    attempt1.orElse(attempt2).getOrElse {
-      s"Status code: $statusCode. Failed to parse error response. Body: ${body.take(200)}${if (body.length > 200) "..." else ""}"
-    }
-  }
-
-
-
-  // Обработка исключений времени выполнения Future (например, проблемы с сетью)
-  private def handleExceptions: PartialFunction[Throwable, Future[String]] = {
-    // Ловим ResponseException отдельно, если они не были обработаны ранее (маловероятно из-за recoverWith)
-    // case e: ResponseException[String, io.circe.Error] => handleErrorResponse(e)
-    // Ловим другие исключения
-    case ex: Exception =>
-      // Логирование ошибки может быть полезно здесь
-      // logger.error("Request failed unexpectedly", ex)
-      Future.failed(new Exception(s"Request execution failed: ${ex.getMessage}", ex)) // Включаем исходное исключение
-  }
-
-  // Метод для обновления модели (без изменений, но с комментарием про потокобезопасность)
+  /**
+   * Обновляет имя текущей используемой модели AI.
+   */
   def updateModel(newModel: String): Unit = {
-    // @volatile помогает с видимостью, но не гарантирует атомарность
-    // при одновременном вызове process и updateModel.
-    // Для данного случая может быть достаточно.
-    currentModel = newModel
+    val trimmedModel = newModel.trim
+    // Обновляем только если имя не пустое и отличается от текущего
+    if (trimmedModel.nonEmpty && trimmedModel != currentModel) {
+      logger.info("Updating AI model used by AIService from '{}' to: {}", currentModel, trimmedModel)
+      currentModel = trimmedModel // Устанавливаем новое имя
+    } else if (trimmedModel.isEmpty) {
+      logger.warn("Attempted to update AI model to an empty string. Keeping current model '{}'.", currentModel)
+    }
   }
 
-  // Метод для корректного завершения работы бэкенда
+  /**
+   * Освобождает ресурсы HTTP бэкенда. Вызывать при завершении приложения.
+   */
   def shutdown(): Future[Unit] = {
-    backend.close()
+    logger.info("Shutting down AIService HTTP backend...")
+    backend.close() // Закрытие бэкенда sttp (PekkoHttpBackend)
+  }
+
+  // --- Приватные Вспомогательные Методы Обработки Ответов и Ошибок ---
+
+  /** Асинхронно отправляет HTTP запрос с помощью sttp бэкенда. */
+  private def sendRequest(request: Request[ApiResponse, Any]): Future[Response[ApiResponse]] = {
+    logger.trace("Sending request to AI API at {}", request.uri)
+    request.send(backend) // Выполняем отправку
+  }
+
+  /** Обрабатывает успешный HTTP ответ (статус 2xx). */
+  private def handleResponse(response: Response[ApiResponse])(implicit ec: ExecutionContext): Future[String] = {
+    logger.trace("Received successful response from AI API (Status: {}). Processing body...", response.code)
+    response.body match {
+      // Case 1: Тело ответа успешно десериализовано в GenerateContentResponse
+      case Right(apiResponse) =>
+        apiResponse.candidates match { // Ищем кандидатов в ответе
+          case Some(candidate :: _) => // Если есть хотя бы один кандидат, берем первого
+            extractAnswer(candidate.content) // Извлекаем текст ответа
+          case _ => // Если кандидатов нет
+            logger.warn("No candidates found in the successful AI response body.")
+            Future.failed(new Exception("Ответ AI не содержит данных (no candidates).")) // Ошибка
+        }
+      // Case 2: Ошибка десериализации тела ответа (даже при статусе 2xx)
+      case Left(error: ResponseException[String, io.circe.Error]) =>
+        logger.error("Failed to process/deserialize successful AI API response body.", error)
+        handleDeserializationError(error) // Обрабатываем ошибку десериализации
+    }
+  }
+
+  /** Обрабатывает ошибки десериализации JSON ответа sttp. */
+  private def handleDeserializationError(error: ResponseException[String, io.circe.Error]): Future[String] = error match {
+    // Явно обрабатываем DeserializationException
+    case DeserializationException(body, e) =>
+      logger.warn(s"Failed to deserialize AI API response body. Circe Error: ${e.getMessage}. Body start: ${body.take(500)}", e)
+      Future.failed(new Exception(s"Ошибка разбора ответа от AI: ${e.getMessage}"))
+    // HttpError также может попасть сюда, если sttp не смог распарсить JSON ошибки
+    case HttpError(body, statusCode) =>
+      val errorMsg = extractErrorMessage(body, statusCode) // Пытаемся извлечь сообщение
+      logger.warn("Received HTTP Error from AI API (during response body processing). Status: {}, Message: {}", statusCode, errorMsg)
+      Future.failed(new Exception(s"Ошибка API $statusCode: $errorMsg"))
+  }
+
+  /** Извлекает основной текстовый ответ из 'content' кандидата. */
+  private def extractAnswer(content: Content): Future[String] = content.parts match {
+    case head :: _ => Future.successful(head.text) // Возвращаем текст из первой части
+    case _ => Future.failed(new Exception("Ответ AI не содержит текстовых данных (content.parts).")) // Если список parts пуст
+  }
+
+  /** Обрабатывает HTTP ошибки (статус не 2xx), извлекая сообщение. */
+  private def handleHttpError(body: String, statusCode: StatusCode): Future[String] = {
+    val errorMsg = extractErrorMessage(body, statusCode) // Пытаемся извлечь читаемое сообщение
+    logger.warn("Received HTTP Error from AI API. Status: {}, Extracted Message: {}", statusCode, errorMsg)
+    // Возвращаем Future.failed с понятным сообщением
+    Future.failed(new Exception(s"Ошибка API $statusCode: $errorMsg"))
+  }
+
+  /** Пытается извлечь сообщение об ошибке из JSON тела ответа API. */
+  private def extractErrorMessage(body: String, statusCode: StatusCode): String = {
+    // Попытка 1: Распарсить как стандартную структуру ошибки Gemini
+    val attempt1: Either[io.circe.Error, String] = parse(body) // Парсим JSON строку
+      .flatMap(_.as[GeminiApiError]) // Пытаемся декодировать как GeminiApiError
+      .map(e => s"${e.error.message} (code: ${e.error.code}, status: ${e.error.status})") // Формируем строку из деталей
+
+    lazy val attempt2: Either[io.circe.Error, String] = parse(body)
+      .flatMap(_.as[ErrorDetails]) 
+      .map(d => s"${d.message} (code: ${d.code}, status: ${d.status})") // Формируем строку
+
+    attempt1.orElse(attempt2).getOrElse { // Если обе попытки парсинга не удались
+      val bodyExcerpt = body.replaceAll("\\s+", " ").take(200) // Берем начало тела ответа, убирая лишние пробелы
+      s"Не удалось извлечь детальное сообщение об ошибке API. Код ответа: $statusCode. Начало тела ответа: $bodyExcerpt${if (body.length > 200) "..." else ""}"
+    }
+  }
+
+  /**
+   * Обрабатывает исключения, возникшие при выполнении Future (например, сетевые ошибки, таймауты).
+   * Используется как PartialFunction для метода `recoverWith`.
+   */
+  private def handleExceptions(implicit ec: ExecutionContext): PartialFunction[Throwable, Future[String]] = {
+
+    case NonFatal(ex: Throwable) =>
+      logger.error("AI request execution failed unexpectedly (e.g., network issue, timeout).", ex)
+      Future.failed(new Exception(s"Ошибка выполнения запроса к AI: ${ex.getMessage}", ex))
   }
 }

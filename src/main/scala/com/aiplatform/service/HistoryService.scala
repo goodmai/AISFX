@@ -1,29 +1,44 @@
+// updated: scala/com/aiplatform/service/HistoryService.scala
 package com.aiplatform.service
 
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
-import com.aiplatform.model.{AppState, Dialog}
-import com.aiplatform.repository.StateRepository
+import com.aiplatform.model.Dialog
+// Убираем импорты AppState и StateRepository, т.к. актор больше не управляет состоянием
+// import com.aiplatform.model.AppState
+// import com.aiplatform.repository.StateRepository
+import org.slf4j.LoggerFactory
 
 object HistoryService {
+  private val logger = LoggerFactory.getLogger(getClass)
+
+  // --- ИЗМЕНЕНИЕ: Обновленные команды ---
   sealed trait Command
-  case class AddDialog(dialog: Dialog) extends Command
-  case class GetHistory(replyTo: ActorRef[List[Dialog]]) extends Command
-  case object Save extends Command
+  // AddDialog теперь включает имя кнопки (контекст)
+  case class AddDialogEvent(buttonName: String, dialog: Dialog) extends Command
+  // Убираем GetHistory и Save, так как состояние управляется извне
+  // case class GetHistory(replyTo: ActorRef[List[Dialog]]) extends Command
+  // case object Save extends Command
+  // ---------------------------------------
 
-  def apply(): Behavior[Command] = behavior(AppState.initialState.dialogHistory)
+  // --- ИЗМЕНЕНИЕ: Упрощенное поведение ---
+  // apply() больше не принимает начальное состояние
+  def apply(): Behavior[Command] = behavior()
 
-  private def behavior(history: List[Dialog]): Behavior[Command] =
+  // Убираем параметр state (history) из behavior
+  private def behavior(): Behavior[Command] =
     Behaviors.receive { (context, message) =>
       message match {
-        case AddDialog(dialog) =>
-          behavior(dialog :: history)
-        case GetHistory(replyTo) =>
-          replyTo ! history
-          Behaviors.same
-        case Save =>
-          StateRepository.saveState(AppState.initialState.copy(dialogHistory = history))
-          Behaviors.same
+        // Обрабатываем AddDialogEvent, но пока просто логируем
+        case AddDialogEvent(buttonName, dialog) =>
+          logger.debug(s"HistoryService received AddDialogEvent for button '$buttonName'. Request: ${dialog.request.take(30)}...")
+          // Здесь можно добавить логику, не связанную с хранением основного состояния,
+          // например, отправку события в другой сервис, аналитику и т.д.
+          // На данный момент ничего не делаем с состоянием.
+          Behaviors.same // Остаемся в том же поведении
+
+        // Убраны case для GetHistory и Save
       }
     }
+  // ------------------------------------
 }

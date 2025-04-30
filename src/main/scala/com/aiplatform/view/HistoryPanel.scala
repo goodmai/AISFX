@@ -1,99 +1,140 @@
 package com.aiplatform.view
 
-import com.aiplatform.model.Dialog
-import org.apache.pekko.actor.typed.ActorRef
-import com.aiplatform.service.HistoryService
-import com.aiplatform.repository.StateRepository // Добавлен импорт для загрузки начального состояния
+import com.aiplatform.controller.MainController
+import com.aiplatform.model.Topic
+import scalafx.Includes._
+import scalafx.application.Platform
 import scalafx.collections.ObservableBuffer
-import scalafx.scene.control.{ListCell, ListView, SelectionMode} // Добавлен SelectionMode
-import scalafx.scene.layout.{Priority, VBox}
+import scalafx.geometry.{Insets, Pos}
+import scalafx.scene.control._
+import scalafx.scene.layout.{BorderPane, HBox, Priority, VBox}
 import scalafx.scene.Parent
-import scalafx.scene.text.Text
+import org.slf4j.LoggerFactory
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import scala.jdk.CollectionConverters._ // Импорт для .asJava
 
-// Объект для создания панели истории
 object HistoryPanel {
 
-  // Буфер для хранения элементов списка (должен быть Observable для автообновления ListView)
-  private val historyItems = ObservableBuffer[Dialog]()
+  private val logger = LoggerFactory.getLogger(getClass)
+  private val topicItems = ObservableBuffer[Topic]()
+  private var mainControllerOpt: Option[MainController] = None
 
-  // Сам список
-  private val historyListView = new ListView[Dialog](historyItems) {
+  private val dateTimeFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
+      .withZone(ZoneId.systemDefault())
+
+  // --- UI Элементы ---
+  private lazy val topicsListView = new ListView[Topic](topicItems) {
     vgrow = Priority.Always
     styleClass.add("history-list-view")
-    //selectionModel().selectionMode_=(SelectionMode.Single) // Используем setter syntax `_=`
     selectionModel().setSelectionMode(SelectionMode.Single)
-    // --- ИСПРАВЛЕНИЕ 1: Явный тип параметра для cellFactory ---
-    cellFactory = (listView: ListView[Dialog]) => { // Указываем тип параметра listView
-      new ListCell[Dialog] {
-        // Привязываемся к изменению itemProperty ячейки
-        item.onChange { (_, _, newDialog) =>
-          if (newDialog != null) {
-            // Формируем отображение для непустой ячейки
-            val requestText = new Text(s"Q: ${newDialog.request.take(50)}...") {
-              wrappingWidth = 180 // Ограничиваем ширину текста
+    prefWidth = 250
+
+    cellFactory = (listView: ListView[Topic]) => {
+      new ListCell[Topic] {
+        val topicTitleLabel = new Label() { style = "-fx-font-weight: bold;"; maxWidth=180; wrapText=true; minHeight = 30 }
+        val topicDateLabel = new Label() { style = "-fx-font-size: 0.8em; -fx-fill: gray;" }
+        val textVBox = new VBox(topicTitleLabel, topicDateLabel) { spacing = 2 }
+        val deleteButton = new Button("-") {
+          style = "-fx-font-size: 9px; -fx-padding: 1px 4px; -fx-cursor: hand;"
+          tooltip = Tooltip("Удалить этот топик")
+          onAction = _ => {
+            Option(item.value).foreach { topic =>
+              logger.debug(s"Delete button clicked for topic: ${topic.title} (ID: ${topic.id})")
+              mainControllerOpt.foreach(_.deleteTopic(topic.id))
             }
-            val modelText = new Text(s"(${newDialog.model})") {
-              style = "-fx-font-size: 0.8em; -fx-fill: gray;"
-            }
-            // Устанавливаем графику ячейки
-            graphic = new VBox(requestText, modelText) {
-              styleClass.add("history-list-cell")
-            }
-            text = null // Убираем стандартный текст ячейки
-          } else {
-            // Очищаем графику и текст для пустой ячейки
-            graphic = null
+          }
+        }
+        val buttonBox = new HBox(5, deleteButton) { alignment = Pos.CenterRight }
+        val cellLayout = new BorderPane {
+          styleClass.add("topic-list-cell")
+          left = textVBox
+          right = buttonBox
+          padding = Insets(5)
+        }
+
+        item.onChange { (_, _, newTopic) =>
+          if (newTopic != null && !empty.value) {
+            topicTitleLabel.text = newTopic.title
+            topicDateLabel.text = dateTimeFormatter.format(newTopic.lastUpdatedAt)
+            tooltip = Tooltip(s"Топик: ${newTopic.title}\nКатегория: ${newTopic.category}\nСоздан: ${newTopic.createdAt}\nОбновлен: ${newTopic.lastUpdatedAt}\nСообщений: ${newTopic.dialogs.size}")
+            graphic = cellLayout
             text = null
+          } else {
+            graphic = null; text = null; tooltip = null
           }
         }
       }
     }
   }
 
-  // Ссылка на актора для возможных действий (например, загрузка по клику)
-  private var historyServiceActor: Option[ActorRef[HistoryService.Command]] = None
+  /**
+   * Создает корневой узел панели истории.
+   */
+  def create(controller: MainController): Parent = {
+    mainControllerOpt = Some(controller)
 
-  def create(actor: ActorRef[HistoryService.Command]): Parent = {
-    historyServiceActor = Some(actor)
-
-    // --- ИСПРАВЛЕНИЕ 2: Используем addListener вместо onChange ---
-    historyListView.selectionModel().selectedItemProperty.addListener {
-      // Эта лямбда-функция будет вызвана при изменении выбора
-      (observable, oldValue, newValue) => // Параметры ChangeListener
-        if (newValue != null) {
-          println(s"Selected history item: ${newValue.request.take(30)}...")
-          // Пример действия: отобразить полный диалог в ResponseArea
-          // ResponseArea.updateResponse(s"Запрос (${newValue.model}):\n${newValue.request}\n\nОтвет:\n${newValue.response}")
-        }
+    topicsListView.selectionModel().selectedItem.onChange { (_, _, selectedTopic) =>
+      val selectedTopicId = Option(selectedTopic).map(_.id)
+      logger.trace(s"UI selection changed. Informing controller about selected topic ID: ${selectedTopicId.getOrElse("None")}")
+      mainControllerOpt.foreach(_.setActiveTopic(selectedTopicId.orNull))
     }
 
-    // Загрузка начальной истории при создании панели
-    val initialState = StateRepository.loadState()
-    updateEntries(initialState.dialogHistory)
+    logger.info("HistoryPanel created.")
+    new VBox { children = Seq(topicsListView); vgrow = Priority.Always; styleClass.add("history-panel") }
+  }
 
-    // Создаем VBox, содержащий ListView
-    new VBox {
-      children = Seq(historyListView)
-      vgrow = Priority.Always
-      prefWidth = 220
-      styleClass.add("history-panel")
+  /**
+   * Обновляет список топиков (получает отфильтрованный список).
+   */
+  def updateTopics(filteredSortedTopics: List[Topic], activeTopicId: Option[String]): Unit = {
+    Platform.runLater {
+      val currentSelectionId = Option(topicsListView.selectionModel().selectedItem.value).map(_.id)
+      topicItems.setAll(filteredSortedTopics.asJava) // Обновляем буфер
+
+      val topicToSelectOpt = activeTopicId.flatMap(id => filteredSortedTopics.find(_.id == id))
+
+      topicToSelectOpt match {
+        case Some(topicToSelect) =>
+          if (currentSelectionId != Some(topicToSelect.id)) {
+            topicsListView.selectionModel().select(topicToSelect)
+            topicsListView.scrollTo(topicToSelect)
+            logger.debug(s"Active topic '${topicToSelect.title}' selected in list.")
+          } else { logger.trace(s"Topic '${topicToSelect.title}' already selected.") }
+        case None =>
+          if (currentSelectionId.isDefined) {
+            topicsListView.selectionModel().clearSelection()
+            logger.debug("Active topic not in filtered list. Cleared selection.")
+          } else { logger.trace("List updated, no active/selected topic.") }
+      }
     }
   }
-  /** Добавляет запись в начало видимого списка истории */
-  def addEntry(dialog: Dialog): Unit = {
-    println(s"[HistoryPanel] Adding entry: ${dialog.request.take(20)}...")
-    historyItems.insert(0, dialog) // Вставляем в начало ObservableBuffer
-    // Опционально: прокрутить к новому элементу или ограничить размер
-    // historyListView.scrollTo(0)
-    // if (historyItems.length > 100) historyItems.remove(historyItems.length - 1)
+
+  /**
+   * Программно выбирает топик в списке.
+   */
+  def selectTopic(topicId: String): Unit = {
+    Platform.runLater {
+      val topicToSelectOpt = Option(topicId).flatMap(id => topicItems.find(_.id == id))
+      val currentSelectionOpt = Option(topicsListView.selectionModel().selectedItem.value)
+
+      if (topicToSelectOpt.isDefined) {
+        val topicToSelect = topicToSelectOpt.get
+        if (currentSelectionOpt != topicToSelectOpt) {
+          topicsListView.selectionModel().select(topicToSelect)
+          topicsListView.scrollTo(topicToSelect)
+          logger.debug(s"Programmatically selected topic '${topicToSelect.title}'.")
+        } else { logger.trace(s"Topic '${topicToSelect.title}' already selected programmatically.") }
+      } else { // Топик не найден в списке или topicId = null
+        if (currentSelectionOpt.isDefined) {
+          topicsListView.selectionModel().clearSelection()
+          logger.debug(s"Programmatic selection requested for '$topicId'/null, not visible/null. Selection cleared.")
+        } else { logger.trace(s"Programmatic selection for '$topicId'/null, not visible/null, nothing selected.") }
+      }
+    }
   }
 
-  /** Обновляет весь список истории (например, при начальной загрузке) */
-  def updateEntries(dialogs: List[Dialog]): Unit = {
-    println(s"[HistoryPanel] Updating all entries. Count: ${dialogs.length}")
-    historyItems.clear()
-    // Добавляем в буфер так, чтобы новые были наверху (если dialogs это List с новыми в начале)
-    // Если dialogs отсортированы от старых к новым, используйте addAll(dialogs.reverse)
-    historyItems.addAll(dialogs) // Предполагаем, что dialogs уже в нужном порядке (новые первыми)
-  }
-}
+} 
