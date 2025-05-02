@@ -1,137 +1,181 @@
+// src/main/scala/com/aiplatform/view/Header.scala
 package com.aiplatform.view
 
-import scalafx.scene.control.Button
-import scalafx.scene.layout.HBox
-import scalafx.beans.property.StringProperty
-import org.slf4j.LoggerFactory
+// Импорты ScalaFX
 import scalafx.Includes._
-import scala.util.Try // Для безопасного парсинга цвета
+import scalafx.beans.property.StringProperty
+import scalafx.scene.control.{Button, Tooltip}
+import scalafx.scene.layout.HBox
+
+// Импорты JavaFX
+import javafx.scene.paint.{Color => JFXColor} // Для deriveColor
+
+// Импорты для логирования и утилит
+import org.slf4j.LoggerFactory // <<< Используем стандартный SLF4j логгер
+import scala.util.Try
+// Убраны импорты Duration и TimeUnit, т.к. ThrottlingLogger не используется
 
 /**
- * Компонент хедера приложения, содержащий кнопки навигации/действий.
- * @param onHeaderButtonClicked Функция обратного вызова, вызываемая при нажатии кнопки.
- * Принимает имя нажатой кнопки в качестве аргумента.
+ * Компонент хедера приложения. Отображает кнопки категорий и кнопку настроек.
+ * Использует стандартный логгер SLF4j.
+ *
+ * @param onHeaderButtonClicked Функция обратного вызова, вызываемая при нажатии
+ * любой кнопки в хедере. Передает имя (или userData) нажатой кнопки.
  */
 class Header(onHeaderButtonClicked: String => Unit) {
 
+  // Инициализируем стандартный логгер SLF4j
   private val logger = LoggerFactory.getLogger(getClass)
 
-  // Используем buttonNames из companion object ниже
-  // Инициализируем первой кнопкой
-  private val activeHeaderButton = StringProperty(Header.buttonNames.headOption.getOrElse(""))
+  private val activeCategoryButtonName = StringProperty(Header.categoryButtonNames.headOption.getOrElse(""))
   private var headerButtons: List[Button] = List.empty
 
-  // --- Пастельные цвета КОЖЗГСФ ---
-  private val pastelColors: List[String] = List(
-    "#FFC0CB", "#FFDAB9", "#FFFFE0", "#90EE90", "#ADD8E6", "#B0C4DE", "#E6E6FA", // КОЖЗГСФ
-    "#FFB6C1", "#98FB98" // Дополнительные для Exam, Integrations
+  // Карты цветов и подсказок остаются без изменений
+  private val buttonColorMap: Map[String, String] = Map(
+    "Research" -> "#FFD1DC", "Code" -> "#FFECB3", "Review" -> "#C8E6C9",
+    "Test" -> "#BBDEFB", "Deploy" -> "#D1C4E9", "Audio" -> "#FFCCBC",
+    "Stream" -> "#CFD8DC", "Exam" -> "#F0F4C3", "Integrations" -> "#D7CCC8",
+    "Global" -> "#E0E0E0", "Settings" -> "#616161"
   )
+  private val buttonTooltips: Map[String, Tooltip] = Map(
+    "Research" -> Tooltip("Запросы на исследование"), "Code" -> Tooltip("Запросы на генерацию/анализ кода"),
+    "Review" -> Tooltip("Запросы на ревью кода"), "Test" -> Tooltip("Запросы на генерацию тестов"),
+    "Deploy" -> Tooltip("Запросы, связанные с деплоем"), "Audio" -> Tooltip("Запросы для аудио"),
+    "Stream" -> Tooltip("Запросы для потоков данных"), "Exam" -> Tooltip("Запросы для экзаменов"),
+    "Integrations" -> Tooltip("Запросы об интеграциях"),
+    "Global" -> Tooltip("Режим использования глобальной модели AI (без пресетов категорий)"),
+    "Settings" -> Tooltip("Открыть настройки приложения")
+  ).map { case (k, v) => (k, v: Tooltip) }
 
-  // Карта: Имя кнопки -> Цвет
-  private val buttonColorMap: Map[String, String] = Header.buttonNames
-    .filterNot(_ == "Settings")
-    .zip(pastelColors)
-    .toMap
-
-  // Функция для модификации цвета (пример осветления/затемнения)
-  private def adjustBrightness(hexColor: String, factor: Double): String = {
-    Try {
-      val color = javafx.scene.paint.Color.web(hexColor)
-      val brighterColor = color.deriveColor(0, 1, factor, 1)
-      def toHex(d: Double): String = f"${(d * 255).round.toInt.max(0).min(255)}%02x"
-      s"#${toHex(brighterColor.getRed)}${toHex(brighterColor.getGreen)}${toHex(brighterColor.getBlue)}"
-    }.getOrElse(hexColor)
-  }
-
+  // Функция изменения яркости остается без изменений
+  private def adjustBrightness(hexColor: String, factor: Double): String = Try {
+    val color = JFXColor.web(hexColor)
+    val adjustedColor = color.deriveColor(0, 1, factor, 1)
+    def toHex(d: Double): String = f"${(d * 255).round.toInt.max(0).min(255)}%02x"
+    s"#${toHex(adjustedColor.getRed)}${toHex(adjustedColor.getGreen)}${toHex(adjustedColor.getBlue)}"
+  }.getOrElse(hexColor)
 
   /**
-   * Обновляет стили всех кнопок в хедере в соответствии с текущей активной кнопкой.
+   * Обновляет стили кнопок хедера.
+   * Использует ТОЛЬКО явные, константные значения в инлайн-стилях.
+   * Использует стандартный логгер SLF4j для предупреждений.
    */
   private def updateHeaderButtonStyles(): Unit = {
-    val currentActive = activeHeaderButton.value
+    val currentActiveCategory = activeCategoryButtonName.value
+    logger.trace(s"Updating header button styles. Active category: '$currentActiveCategory'")
+
     headerButtons.foreach { btn =>
-      val buttonName = btn.text.value
-      val baseColor = buttonColorMap.getOrElse(buttonName, "#D3D3D3") // Серый для Settings/fallback
-      val isActive = buttonName == currentActive
+      val buttonName = btn.userData match {
+        case name: String => name
+        case _ =>
+          val btnText = btn.text.value
+          // <<< ВОЗВРАЩАЕМ СТАНДАРТНЫЙ ЛОГГЕР ДЛЯ ПРЕДУПРЕЖДЕНИЯ >>>
+          logger.warn(s"Button user data not set or not a String for button text: $btnText. Using text as fallback.")
+          btnText // Fallback на текст кнопки
+      }
 
-      val finalColor = if (isActive && buttonName != "Settings") adjustBrightness(baseColor, 0.85) else baseColor
-      val borderStyle = if (isActive && buttonName != "Settings") "-fx-border-color: #333333; -fx-border-width: 1.5px; -fx-border-radius: 3px;" else "-fx-border-width: 0px;"
-      val textColor = if (buttonName == "Settings") "white" else "black"
+      // Логика определения состояния и цветов остается прежней
+      val isCategoryButton = Header.categoryButtonNames.contains(buttonName)
+      val isSettingsButton = buttonName == "Settings"
+      val isActive = isCategoryButton && buttonName == currentActiveCategory
 
-      btn.style = s"""
-        -fx-background-color: $finalColor;
-        -fx-text-fill: $textColor;
-        -fx-padding: 8px 15px;
-        -fx-font-size: 13px;
-        -fx-background-radius: 5px;
-        $borderStyle
-      """
+      val baseBgColor = buttonColorMap.getOrElse(buttonName, "#E0E0E0")
+      val activeBrightnessFactor = 0.85; val hoverBrightnessFactor = 0.95; val activeHoverBrightnessFactor = 0.80
+
+      val finalBgColor = if (isSettingsButton) baseBgColor else if (isActive) adjustBrightness(baseBgColor, activeBrightnessFactor) else baseBgColor
+      val hoverBgColor = if (isSettingsButton) adjustBrightness(baseBgColor, 1.1) else if (isActive) adjustBrightness(baseBgColor, activeHoverBrightnessFactor) else adjustBrightness(baseBgColor, hoverBrightnessFactor)
+      val textColor = if (isSettingsButton) "white" else "black"
+      val fontWeight = if(isActive) "bold" else "normal"
+      val padding = "6px 12px"
+      val bgRadius = "5px"
+      val borderColor = if (isActive) "#555555" else "transparent"
+      val borderWidth = if (isActive) "1.5px" else "0px"
+      val borderRadius = if (isActive) "5px" else "0px"
+      val cursor = "hand"
+
+      // Формируем инлайн-стиль только с явными значениями
+      val baseStyle = s"""
+    -fx-background-color: $finalBgColor;
+    -fx-text-fill: $textColor;
+    -fx-font-weight: $fontWeight;
+    -fx-padding: $padding;
+    -fx-background-radius: $bgRadius;
+    -fx-border-color: $borderColor;
+    -fx-border-width: $borderWidth;
+    -fx-border-radius: $borderRadius;
+    -fx-cursor: $cursor;
+  """
+      btn.style = baseStyle // Применяем стиль
+
+      // Стиль при наведении - также использует только явные значения
+      val hoverStyle = s"""
+    -fx-background-color: $hoverBgColor;
+    -fx-text-fill: $textColor;
+    -fx-font-weight: $fontWeight;
+    -fx-padding: $padding;
+    -fx-background-radius: $bgRadius;
+    -fx-border-color: $borderColor;
+    -fx-border-width: $borderWidth;
+    -fx-border-radius: $borderRadius;
+    -fx-cursor: $cursor;
+  """
+      // Устанавливаем обработчики наведения
+      btn.onMouseEntered = _ => { btn.style = hoverStyle }
+      btn.onMouseExited = _ => { btn.style = baseStyle }
     }
-    logger.trace("Header button styles updated. Active: {}", currentActive)
   }
 
   /**
    * Создает и возвращает узел HBox, представляющий хедер.
    */
   def createHeaderNode(): HBox = {
-    headerButtons = Header.buttonNames.map { name =>
+    headerButtons = Header.allButtonNames.map { name =>
       new Button(name) {
-        // Стиль установится в updateHeaderButtonStyles
+        tooltip = buttonTooltips.get(name).orNull
+        userData = name
         onAction = { _ =>
-          val previouslyActive = activeHeaderButton.value
-          // Позволяем нажимать Settings повторно, остальные - только если не активны
-          if (previouslyActive != name || name == "Settings") {
-            logger.debug("Header button '{}' clicked.", name)
-            // Обновляем состояние только если кнопка НЕ Settings и она не была активной
-            if (name != "Settings" && previouslyActive != name) {
-              activeHeaderButton.value = name // Обновляем свойство
-              updateHeaderButtonStyles() // Обновляем стили
-            }
-            // Всегда вызываем колбэк (для Settings и для смены категории)
-            onHeaderButtonClicked(name)
-          } else {
-            logger.trace("Header button '{}' re-clicked (no action).", name)
-          }
+          logger.debug(s"Header button '$name' clicked.")
+          onHeaderButtonClicked(name)
         }
       }
     }
-
-    // Применяем начальные стили
     updateHeaderButtonStyles()
-
     new HBox {
-      style = "-fx-background-color: #E8E8E8; -fx-padding: 10px; -fx-border-color: #CCCCCC; -fx-border-width: 0 0 1 0;"
+      styleClass.add("header-area")
       children = headerButtons
-      spacing = 8
     }
   }
 
-  // --- ДОБАВЛЕН МЕТОД ---
   /**
-   * Устанавливает активную кнопку программно.
-   * Используется контроллером при инициализации или смене категории.
-   * @param buttonName Имя кнопки, которую нужно сделать активной.
+   * Устанавливает активную кнопку категории.
    */
-  def setActiveButton(buttonName: String): Unit = {
-    if (Header.buttonNames.contains(buttonName) && buttonName != "Settings") {
-      if (activeHeaderButton.value != buttonName) {
-        logger.debug(s"Programmatically setting active button to: '$buttonName'")
-        activeHeaderButton.value = buttonName
+  def setActiveButton(categoryName: String): Unit = {
+    if (Header.categoryButtonNames.contains(categoryName)) {
+      if (activeCategoryButtonName.value != categoryName) {
+        logger.debug(s"Setting active category button to: '$categoryName'")
+        activeCategoryButtonName.value = categoryName
         updateHeaderButtonStyles()
       } else {
-        logger.trace(s"Programmatic setActiveButton called for already active button '$buttonName'.")
+        logger.trace(s"setActiveButton called for already active category '$categoryName'. Ensuring styles are correct.")
+        updateHeaderButtonStyles()
       }
-    } else if (buttonName == "Settings") {
-      logger.warn("setActiveButton called with 'Settings'. Settings button cannot be programmatically activated.")
     } else {
-      logger.warn(s"setActiveButton called with invalid button name: '$buttonName'. Ignoring.")
+      if (activeCategoryButtonName.value.nonEmpty) {
+        logger.debug(s"setActiveButton called with non-category name: '$categoryName'. Clearing category highlight.")
+        activeCategoryButtonName.value = ""
+        updateHeaderButtonStyles()
+      }
     }
   }
-  // --- ------------- ---
+} // Конец класса Header
 
-}
-
+/**
+ * Объект-компаньон для констант.
+ */
 object Header {
-  // Список имен кнопок
-  val buttonNames: List[String] = List("Research", "Code", "Review", "Test", "Deploy", "Audio", "Stream", "Exam", "Integrations", "Settings")
+  val categoryButtonNames: List[String] = List(
+    "Research", "Code", "Review", "Test", "Deploy",
+    "Audio", "Stream", "Exam", "Integrations", "Global"
+  )
+  val allButtonNames: List[String] = categoryButtonNames ++ List("Settings")
 }

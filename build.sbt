@@ -9,7 +9,7 @@ lazy val root = (project in file("."))
       // ScalaFX
       "org.scalafx" %% "scalafx" % "20.0.0-R31",
 //      "org.slf4j" % "slf4j-simple" % "2.0.16",
-      "ch.qos.logback" % "logback-classic" % "1.5.11",
+      "ch.qos.logback" % "logback-classic" % "1.5.18",
       // Pekko
       "org.apache.pekko" %% "pekko-actor-typed" % "1.1.0",
       "org.apache.pekko" %% "pekko-slf4j" % "1.1.0",
@@ -25,6 +25,7 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.client3" %% "circe" % "3.10.1",
       //scalatest
       "org.scalatest" %% "scalatest" % "3.2.19" % "test",
+      "org.scalatestplus" %% "mockito-5-10" % "3.2.18.0" %"test",
       // circe
       "io.circe" %% "circe-core" % "0.14.7",
       "io.circe" %% "circe-generic" % "0.14.7",
@@ -39,7 +40,8 @@ lazy val root = (project in file("."))
       "org.openjfx" % "javafx-fxml" % "20.0.2" classifier "linux",
       "org.openjfx" % "javafx-media" % "20.0.2" classifier "linux",
       "org.openjfx" % "javafx-base" % "20.0.2" classifier "linux",
-      "org.openjfx" % "javafx-graphics" % "20.0.2" classifier "linux"
+      "org.openjfx" % "javafx-graphics" % "20.0.2" classifier "linux",
+      "org.openjfx" % "javafx-swing" % "20.0.2" classifier "linux"
     ),
 
     scalacOptions ++= Seq(
