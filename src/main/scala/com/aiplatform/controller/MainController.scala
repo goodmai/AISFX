@@ -1,623 +1,669 @@
 // src/main/scala/com/aiplatform/controller/MainController.scala
 package com.aiplatform.controller
 
-import com.aiplatform.controller.manager.{FileManager, PresetManager, RequestExecutionManager, StateManager, TopicManager}
-import com.aiplatform.model.* // Импортируем все модели
+import com.aiplatform.controller.manager.{
+  FileManager,
+  PresetManager,
+  RequestExecutionManager,
+  StateManager,
+  TopicManager
+}
+import com.aiplatform.model.*
 import com.aiplatform.service.{AIService, CredentialsService, ModelFetchingService, InlineData}
-import com.aiplatform.view.{CurrentSettings, DialogUtils, Footer, Header, HistoryPanel, ResponseArea, SettingsView}
+import com.aiplatform.view.{
+  CurrentSettings,
+  DialogUtils,
+  Footer,
+  Header,
+  HistoryPanel,
+  ResponseArea,
+  SettingsView,
+  FileTreeView
+}
 import org.apache.pekko.actor.typed.ActorSystem
 import scalafx.application.Platform
-import scalafx.scene.control.ButtonType
+import scalafx.scene.control.{ButtonType, SplitPane}
 import scalafx.scene.layout.BorderPane
 import scalafx.scene.Parent
 import org.slf4j.LoggerFactory
 import scalafx.stage.Stage
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success, Try, Using}
 import scala.util.control.NonFatal
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong} // Убираем AtomicLong, если fontApplyCounter удален
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import java.io.{ByteArrayOutputStream, File}
-import javafx.scene.image.Image
+import javafx.scene.image.Image as JFXImage
 import javafx.embed.swing.SwingFXUtils
 import javax.imageio.ImageIO
+import scalafx.geometry.Orientation
 
 
-/**
- * Основной контроллер приложения. Координирует взаимодействие между UI (View),
- * сервисами и менеджерами данных/состояния.
- * Внедрены флаги для предотвращения рекурсивных вызовов synchronizeUIState.
- * Логика динамической установки шрифтов удалена.
- * Убран вызов synchronizeUIState из performInitialUISetup.
- *
- * @param system Неявная система акторов Pekko.
- */
-class MainController(implicit system: ActorSystem[?]) {
+class MainController(
+                      implicit
+                      system: ActorSystem[?]
+                    ) {
 
   private val logger = LoggerFactory.getLogger(getClass)
-  private implicit val ec: ExecutionContext = system.executionContext
+  implicit private val ec: ExecutionContext = system.executionContext
 
-  // --- Менеджеры и сервисы ---
   private val stateManager = new StateManager()
-  private val aiService = new AIService()(system.classicSystem)
+  val aiService = new AIService()(system.classicSystem)
   private val topicManager = new TopicManager(stateManager, aiService)
   private val presetManager = new PresetManager(stateManager)
   private val requestExecutionManager = new RequestExecutionManager(
-    stateManager, topicManager, presetManager, aiService
+    stateManager,
+    topicManager,
+    presetManager,
+    aiService
   )
   private val modelFetchingService = new ModelFetchingService()(system, ec)
   private var fileManager: Option[FileManager] = None
 
-  // --- Ссылки на UI компоненты ---
   private var mainStage: Option[Stage] = None
   private var rootPane: Option[BorderPane] = None
-  private var historyPanelRef: Option[HistoryPanel.type] = None
   private var headerRef: Option[Header] = None
   private var footerRef: Option[Footer] = None
+  private var fileTreeViewInstance: Option[FileTreeView] = None
 
-  // --- Состояние UI ---
   private val isRequestInProgress = new AtomicBoolean(false)
-  // Флаг для предотвращения цикла обратной связи от HistoryPanel -> setActiveTopic -> HistoryPanel.selectTopic
   private val isProgrammaticSelectionFlag = new AtomicBoolean(false)
   private var pendingImageData: Option[InlineData] = None
+  private var pendingFileContext: StringBuilder = new StringBuilder()
 
-  // --- Флаги для предотвращения рекурсии ---
-  private val isSyncingUI = new AtomicBoolean(false) // Флаг для synchronizeUIState
-  // private val fontApplyScheduled = new AtomicBoolean(false) // <<< УДАЛЕНО >>>
-
-  // --- Счетчики для отладки ---
+  private val isSyncingUI = new AtomicBoolean(false)
   private val syncCounter = new AtomicLong(0)
-  // private val fontApplyCounter = new AtomicLong(0) // <<< УДАЛЕНО >>>
 
-  /** Публичный getter для флага программного выбора. */
-  def getIsProgrammaticSelection: Boolean = isProgrammaticSelectionFlag.get
+  // --- Публичные методы, доступные для View компонентов ---
+  def getMainStage: Option[Stage] = this.mainStage
 
-
-  //<editor-fold desc="Инициализация и Жизненный Цикл">
-
-  initializeController() // Вызываем инициализацию при создании контроллера
-
-  /** Асинхронная инициализация контроллера (загрузка моделей). */
-  private def initializeController(): Unit = {
-    logger.info("Controller initialization started.")
-    // Асинхронно загружаем модели и обновляем состояние
-    fetchModelsAndUpdateState().andThen { case result =>
-      // После завершения загрузки (успех или неудача)
-      updateAiServiceWithCurrentModel() // Обновляем модель в AIService
-      // Не вызываем synchronizeUIState здесь, MainApp вызовет performInitialUISetup позже
-      result match {
-        case Success(_) => logger.info("Initial model fetch and AI service update complete.")
-        case Failure(e) => logger.error("Initial model fetch failed, continuing initialization.", e) // Не прерываем запуск
-      }
+  def appendToInputArea(text: String): Unit = {
+    Platform.runLater {
+      footerRef.foreach(_.appendText(text))
     }
   }
 
-  /**
-   * Создает основной UI приложения. Вызывается из MainApp.
-   */
-  def createUI(ownerStage: Stage): Parent = {
-    logger.info("Creating application UI structure...")
-    this.mainStage = Some(ownerStage) // Сохраняем ссылку на Stage
+  def getIsProgrammaticSelection: Boolean = isProgrammaticSelectionFlag.get() // () добавлены
+  // --- Конец публичных методов ---
 
-    // --- Создание компонентов View ---
+
+  initializeController()
+
+  private def initializeController(): Unit = {
+    logger.info("Controller initialization started.")
+    val initFuture = fetchModelsAndUpdateState().map { _ =>
+      updateAiServiceWithCurrentModel()
+    }
+    initFuture.onComplete {
+      case Success(_) =>
+        logger.info("Initial model fetch and AI service setup complete. Scheduling initial UI sync.")
+        Platform.runLater(() => performInitialUISetup())
+      case Failure(e) =>
+        logger.error("Initial setup (fetchModels/updateAiService) failed. Scheduling UI sync with potentially stale data.", e)
+        Platform.runLater(() => performInitialUISetup())
+    }
+  }
+
+  def createUI(ownerStage: Stage): Parent = {
+    logger.info("MainController: Creating application UI structure...")
+    this.mainStage = Some(ownerStage)
+    this.fileManager = Some(new FileManager(ownerStage, this.footerRef))
+
     val headerComponent = new Header(onHeaderButtonClicked = handleHeaderAction)
     this.headerRef = Some(headerComponent)
-    val headerPanel = headerComponent.createHeaderNode()
+    val headerNode = headerComponent.createHeaderNode()
 
     val footerComponent = new Footer(
       onSend = processUserInput,
       onNewTopic = startNewTopic,
-      onAttachFileClick = () => fileManager.foreach(_.attachTextFile()),
-      onAttachCodeClick = () => fileManager.foreach(_.attachFolderContext()),
       onFileDropped = handleFileDropped,
       onDirectoryDropped = handleDirectoryDropped,
       onImagePasted = handleImagePasted
     )
     this.footerRef = Some(footerComponent)
-    val footerPanel = footerComponent.createFooterNode()
+    val footerNode = footerComponent.createFooterNode()
 
-    // FileManager создается здесь, передаем Stage и Option[Footer]
-    this.fileManager = Some(new FileManager(ownerStage, this.footerRef))
+    val responseNode = ResponseArea.create()
+    val historyPanelNode = HistoryPanel.create(this)
 
-    val responsePanel = ResponseArea.create() // ResponseArea - объект-компаньон
-    this.historyPanelRef = Some(HistoryPanel) // HistoryPanel - объект-компаньон
-    val historyPanelNode = HistoryPanel.create(this) // Передаем ссылку на текущий контроллер
+    val ftManager = this.fileManager.getOrElse(
+      throw new IllegalStateException("FileManager не был инициализирован перед созданием FileTreeView.")
+    )
+    val fileTreeViewComponent = new FileTreeView(ftManager, this)
+    this.fileTreeViewInstance = Some(fileTreeViewComponent)
+    val fileTreeViewNode = fileTreeViewComponent.viewNode
 
-    // --- Сборка основного Layout ---
-    val centerArea = new BorderPane { styleClass.add("center-pane"); center = responsePanel }
+    val leftSplitPane = new SplitPane {
+      orientation = Orientation.Vertical
+      items.addAll(historyPanelNode, fileTreeViewNode)
+      dividerPositions = 0.25
+    }
+    leftSplitPane.maxWidth = 350
+    leftSplitPane.prefWidth = 300
+
+    val centerArea = new BorderPane {
+      styleClass.add("center-pane")
+      center = responseNode
+    }
+
     val root = new BorderPane {
       styleClass.add("main-pane")
-      top = headerPanel
-      left = historyPanelNode
+      top = headerNode
+      left = leftSplitPane
       center = centerArea
-      bottom = footerPanel
+      bottom = footerNode
     }
-    this.rootPane = Some(root) // Сохраняем ссылку
-
-    logger.info("Application UI structure created and returned from createUI.")
-    root // Возвращаем корневой узел
+    this.rootPane = Some(root)
+    logger.info("Application UI structure created.")
+    root
   }
 
-  /**
-   * Метод для выполнения начальной настройки UI ПОСЛЕ его создания и показа.
-   * Вызывается из MainApp через Platform.runLater.
-   * БОЛЬШЕ НЕ ВЫЗЫВАЕТ synchronizeUIState.
-   */
   def performInitialUISetup(): Unit = {
-    logger.info(">>> Performing Initial UI Setup...")
-    // synchronizeUIState() // <<< УДАЛЕН ВЫЗОВ СИНХРОНИЗАЦИИ >>>
-    logger.info(">>> Initial UI Setup tasks completed (no synchronization called).")
+    logger.info(">>> Performing Initial UI Setup (after async init)...")
+    synchronizeUIState()
+    logger.info(">>> Initial UI Setup tasks completed.")
   }
 
-  /* <<< Метод applyFontSettingsToVisibleElements полностью удален >>> */
-
-  /** Выполняет действия при завершении работы приложения. */
   def shutdown(): Unit = {
-    logger.info("Shutting down AI Platform application...")
-    // Принудительно сохраняем состояние
-    stateManager.forceSaveState().failed.foreach { e =>
-      logger.error("Failed to save state during shutdown.", e)
-    }
-    // Освобождаем ресурсы AIService
+    logger.info("Shutting down MainController and services...")
+    stateManager.forceSaveState().failed.foreach(e => logger.error("Failed to save state during shutdown.", e))
     aiService.shutdown()
     logger.info("AI Service backend resources released.")
-    logger.info("Shutdown complete.")
+    logger.info("MainController shutdown complete.")
   }
 
-  //</editor-fold>
-
-  //<editor-fold desc="Синхронизация Состояния и UI">
-
-  /**
-   * Полностью синхронизирует UI с текущим состоянием AppState.
-   * Использует флаг isSyncingUI для предотвращения рекурсивных/параллельных вызовов.
-   */
   def synchronizeUIState(): Unit = {
     val callId = syncCounter.incrementAndGet()
-
-    // Проверяем и устанавливаем флаг "синхронизация выполняется" атомарно
     if (!isSyncingUI.compareAndSet(false, true)) {
-      logger.warn(s"[$callId] synchronizeUIState aborted: already syncing (flag was true).")
+      logger.warn(s"[$callId] synchronizeUIState aborted: already syncing.")
       return
     }
-
-    // Используем try/finally для гарантированного сброса флага
-    logger.info(s"[$callId] >>> Starting UI synchronization...")
     try {
-      // Гарантируем выполнение в FX потоке
       if (!Platform.isFxApplicationThread) {
-        logger.warn(s"[$callId] synchronizeUIState called from non-FX thread. Rescheduling with Platform.runLater.")
+        logger.warn(s"[$callId] synchronizeUIState called from non-FX thread. Rescheduling.")
         isSyncingUI.set(false)
-        Platform.runLater {
-          logger.debug(s"[$callId] Retrying synchronizeUIState inside Platform.runLater...")
-          synchronizeUIState()
-        }
+        Platform.runLater(() => synchronizeUIState())
         return
       }
 
-      // Мы в FX потоке и флаг isSyncingUI установлен в true
-      logger.info(s"[$callId] Synchronizing UI state on thread: ${Thread.currentThread().getName}")
+      logger.info(s"[$callId] >>> Starting UI synchronization on thread: ${Thread.currentThread().getName}...") // getName()
       val state = currentAppState
       val currentCategory = activeCategoryName
       val activeTopicIdOpt = state.activeTopicId
-      logger.debug(s"[$callId] State: ActiveCategory='$currentCategory', ActiveTopicID='${activeTopicIdOpt.getOrElse("None")}'")
 
-      // Обновляем UI компоненты
-      logger.debug(s"[$callId] Updating Header...")
+      logger.debug(s"[$callId] State details: ActiveCategory='$currentCategory', ActiveTopicID='${activeTopicIdOpt.getOrElse("None")}'")
+
       headerRef.foreach(_.setActiveButton(currentCategory))
-      logger.debug(s"[$callId] Updating History Panel...")
       updateHistoryPanel(currentCategory, activeTopicIdOpt)
-      logger.debug(s"[$callId] Updating Response Area...")
       updateResponseArea(activeTopicIdOpt, currentCategory)
-      logger.debug(s"[$callId] Updating Footer State...")
-      updateFooterState(isRequestInProgress.get())
+      updateFooterState(isRequestInProgress.get()) // get()
 
       logger.info(s"[$callId] <<< UI state synchronization finished.")
-
     } catch {
-      case NonFatal(e) =>
-        logger.error(s"[$callId] synchronizeUIState failed with exception.", e)
+      case NonFatal(e) => logger.error(s"[$callId] synchronizeUIState failed with exception.", e)
     } finally {
       isSyncingUI.set(false)
-      logger.trace(s"[$callId] Reset isSyncingUI flag to false.")
     }
   }
 
-  /** Обновляет список топиков в HistoryPanel. */
-  private def updateHistoryPanel(category: String, activeTopicIdOpt: Option[String]): Unit = {
-    historyPanelRef.foreach { panel =>
-      val topics = topicManager.getTopicsForCategory(category)
-      logger.debug(s"Updating history panel: Category='$category', Topics=${topics.size}, ActiveID=${activeTopicIdOpt.getOrElse("None")}")
-      panel.updateTopics(topics, activeTopicIdOpt)
+  private def updateHistoryPanel(categoryForHistory: String, activeTopicIdOpt: Option[String]): Unit = {
+    val topics = topicManager.getTopicsForCategory(categoryForHistory)
+    logger.debug(
+      s"Updating history panel: Category='$categoryForHistory', Topics=${topics.size}, ActiveID=${activeTopicIdOpt.getOrElse("None")}"
+    )
+    HistoryPanel.updateTopics(topics, activeTopicIdOpt)
+
+    activeTopicIdOpt match {
+      case Some(idToSelect) => HistoryPanel.selectTopic(idToSelect)
+      case None => HistoryPanel.clearSelection()
     }
   }
 
-  /** Обновляет ResponseArea на основе активного топика. */
   private def updateResponseArea(activeTopicIdOpt: Option[String], currentCategory: String): Unit = {
     val topicOpt = activeTopicIdOpt.flatMap(topicManager.findTopicById)
     val dialogsToShow = topicOpt.map(_.dialogs).getOrElse(List.empty)
-    logger.debug(s"Updating response area: ActiveID=${activeTopicIdOpt.getOrElse("None")}, Dialogs=${dialogsToShow.size}")
-    if (activeTopicIdOpt.isDefined) {
+    logger.debug(
+      s"Updating response area: ActiveID=${activeTopicIdOpt.getOrElse("None")}, Dialogs=${dialogsToShow.size}, Category='$currentCategory'"
+    )
+    if (activeTopicIdOpt.isDefined && topicOpt.isDefined) {
       ResponseArea.displayTopicDialogs(dialogsToShow)
-      if (dialogsToShow.isEmpty) ResponseArea.showStatus("Введите ваш первый запрос в этом топике.")
+      if (dialogsToShow.isEmpty) {
+        ResponseArea.showStatus("Это новый топик. Введите ваш первый запрос или добавьте контекст.")
+      }
     } else {
-      if (topicManager.getTopicsForCategory(currentCategory).isEmpty) ResponseArea.showError("Создайте новый топик (+) для начала работы в этой категории.")
-      else ResponseArea.showError("Выберите топик из списка слева.")
+      ResponseArea.clearDialog()
+      val topicsInCurrentCategory = topicManager.getTopicsForCategory(currentCategory)
+      if (topicsInCurrentCategory.isEmpty) {
+        ResponseArea.showError(s"В категории '$currentCategory' нет топиков. Начните новый (+) или выберите другую категорию.")
+      } else {
+        ResponseArea.showStatus(s"Выберите топик из списка слева для категории '$currentCategory' или начните новый (+).")
+      }
     }
   }
 
-  /** Блокирует/разблокирует Footer. */
   private def updateFooterState(locked: Boolean): Unit = {
     footerRef.foreach(_.setLocked(locked))
     logger.trace(s"Footer state updated. Locked: $locked")
   }
 
-  //</editor-fold>
-
-  //<editor-fold desc="Обработка Действий Пользователя (UI Events)">
-
-  /** Обрабатывает нажатия кнопок в Header. */
   def handleHeaderAction(buttonName: String): Unit = {
     logger.info("Header action triggered for button: {}", buttonName)
-    if (!isRequestInProgress.get()) {
-      if (buttonName == "Settings") {
-        showSettingsWindow()
-      } else if (Header.categoryButtonNames.contains(buttonName)) {
-        val currentCategory = activeCategoryName
-        if (buttonName != currentCategory) {
-          logger.info(s"Switching active category from '$currentCategory' to '$buttonName'")
-          val nextActiveTopicIdOpt = topicManager.determineActiveTopicForCategory(buttonName)
-          setActiveTopic(nextActiveTopicIdOpt)
-        } else {
-          logger.debug("Category button '{}' re-clicked. No category change.", buttonName)
-        }
+    if (isRequestInProgress.get()) { // get()
+      logger.warn("Ignoring header action: request in progress.")
+      DialogUtils.showInfo("Пожалуйста, дождитесь завершения текущего запроса.", ownerWindow = mainStage)
+      return
+    }
+    if (buttonName == "Settings") {
+      showSettingsWindow()
+    } else if (Header.categoryButtonNames.contains(buttonName)) {
+      val currentActiveCat = activeCategoryName
+      if (buttonName != currentActiveCat) {
+        logger.info(s"Switching active category from '$currentActiveCat' to '$buttonName'")
+        headerRef.foreach(_.setActiveButton(buttonName))
+        val nextActiveTopicIdOpt = topicManager.determineActiveTopicForCategory(buttonName)
+        setActiveTopic(nextActiveTopicIdOpt)
       } else {
-        logger.warn("Unhandled header button action: {}", buttonName)
+        logger.debug("Category button '{}' re-clicked. No category change.", buttonName)
       }
     } else {
-      logger.warn("Ignoring header action while request is in progress.")
+      logger.warn("Unhandled header button action: {}", buttonName)
     }
   }
 
-  /** Обрабатывает отправку текста из Footer. */
   private def processUserInput(inputText: String): Unit = {
     val trimmedText = inputText.trim
     logger.debug("Processing user input: '{}'", trimmedText)
-    if (!isRequestInProgress.get()) {
-      val imageDataToSend = pendingImageData; pendingImageData = None
-      if (trimmedText.isEmpty && imageDataToSend.isEmpty) {
-        logger.warn("Attempted to send empty input (no text and no pending image).")
-        showErrorAlert("Запрос не может быть пустым (введите текст или вставьте изображение).")
-      } else {
-        validateInputLength(trimmedText).orElse(if (imageDataToSend.isEmpty && trimmedText.isEmpty) Some("Пустой запрос") else None) match {
-          case Some(error) => logger.warn("Input validation failed: {}", error); showErrorAlert(error)
-          case None => getApiKey() match {
-            case None => logger.error("API Key missing."); showErrorAlert("API ключ не найден. Добавьте его в настройках.")
-            case Some(apiKey) =>
-              val categoryHint = if (activeCategoryName == "Global") None else Some(activeCategoryName)
-              executeRequest(trimmedText, categoryHint, apiKey, imageDataToSend)
-          }
-        }
-      }
-    } else {
+    if (isRequestInProgress.get()) { // get()
       logger.warn("Attempted to send request while another is in progress.")
-      showErrorAlert("Пожалуйста, дождитесь завершения предыдущего запроса.")
+      DialogUtils.showError("Пожалуйста, дождитесь завершения предыдущего запроса.", ownerWindow = mainStage)
+      return
+    }
+    val imageDataToSend = pendingImageData
+    pendingImageData = None
+    // No need to clear file context here, it will be used for the request
+    if (trimmedText.isEmpty && imageDataToSend.isEmpty) {
+      logger.warn("Attempted to send empty input (no text and no pending image).")
+      DialogUtils.showError("Запрос не может быть пустым (введите текст, прикрепите файлы или вставьте изображение).", ownerWindow = mainStage)
+      return
+    }
+    validateInputLength(trimmedText) match {
+      case Some(error) =>
+        logger.warn("Input validation failed: {}", error)
+        DialogUtils.showError(error, ownerWindow = mainStage)
+      case None =>
+        getApiKey() match { // () добавлены
+          case None =>
+            logger.error("API Key missing.")
+            DialogUtils.showError("API ключ не найден. Пожалуйста, добавьте его в настройках.", ownerWindow = mainStage)
+          case Some(apiKey) =>
+            val categoryForRequest = activeCategoryName
+            val categoryHint = if (categoryForRequest == "Global") None else Some(categoryForRequest)
+            executeRequest(trimmedText, categoryHint, apiKey, imageDataToSend)
+        }
     }
   }
 
-  /** Инициирует создание нового топика. */
   def startNewTopic(): Unit = {
     val category = activeCategoryName
     logger.info(s"User requested to start a new topic in category '$category'.")
-    if (!isRequestInProgress.get()) {
-      pendingImageData = None
-      topicManager.createNewTopic(category) match {
-        case Success(newTopic) =>
-          logger.info(s"New topic '${newTopic.id}' created successfully. Setting active.")
-          setActiveTopic(Some(newTopic.id))
-          Platform.runLater { footerRef.foreach(_.clearInput()) }
-        case Failure(e) =>
-          logger.error(s"Failed to create new topic in category '$category'.", e)
-          showErrorAlert(s"Не удалось создать новый топик: ${e.getMessage}")
-      }
-    } else logger.warn("Ignoring 'New Topic' action: request in progress.")
-  }
-
-  /**
-   * Устанавливает активный топик.
-   * Вызывает synchronizeUIState после успешного обновления состояния.
-   * Использует isProgrammaticSelectionFlag для предотвращения цикла с HistoryPanel.
-   */
-  def setActiveTopic(topicIdOpt: Option[String]): Unit = {
-    if (isProgrammaticSelectionFlag.get()) {
-      logger.trace(s"Skipping setActiveTopic call for ${topicIdOpt.getOrElse("None")} due to programmatic selection flag.")
+    if (isRequestInProgress.get()) { // get()
+      logger.warn("Ignoring 'New Topic' action: request in progress.")
       return
     }
-
     pendingImageData = None
-    val currentActiveId = currentAppState.activeTopicId
-    if (topicIdOpt != currentActiveId) {
-      logger.debug(s"Request to change active topic from ${currentActiveId.getOrElse("None")} to ${topicIdOpt.getOrElse("None")}")
-      val previousCategory = activeCategoryName
-
-      topicManager.setActiveTopic(topicIdOpt) match {
-        case Success(_) =>
-          logger.debug("Active topic state updated successfully in StateManager.")
-          val newCategory = activeCategoryName
-          if (previousCategory != newCategory) {
-            logger.info(s"Category changed from '$previousCategory' to '$newCategory'. Updating AI service model.")
-            updateAiServiceWithCurrentModel()
-          }
-          Platform.runLater {
-            logger.debug("Scheduling UI synchronization and HistoryPanel selection after user setActiveTopic...")
-            synchronizeUIState() // Синхронизируем UI
-
-            try {
-              if (isProgrammaticSelectionFlag.compareAndSet(false, true)) {
-                logger.debug("Setting programmatic selection flag TRUE before HistoryPanel.selectTopic")
-                historyPanelRef.foreach(_.selectTopic(topicIdOpt.orNull))
-              } else {
-                logger.warn("Could not set programmatic selection flag (already true?) before HistoryPanel.selectTopic")
-              }
-            } finally {
-              isProgrammaticSelectionFlag.set(false)
-              logger.debug("Reset programmatic selection flag to FALSE after HistoryPanel.selectTopic")
-            }
-            logger.debug("UI synchronization and HistoryPanel selection scheduled.")
-          }
-        case Failure(e) =>
-          logger.error(s"Failed to set active topic to ${topicIdOpt.getOrElse("None")}.", e)
-          showErrorAlert(s"Ошибка при выборе топика: ${e.getMessage}")
-      }
-    } else {
-      logger.trace(s"setActiveTopic called for already active topic ID: ${topicIdOpt.getOrElse("None")}. Skipping update.")
+    clearFileContext()
+    topicManager.createNewTopic(category) match {
+      case Success(newTopic) =>
+        logger.info(s"New topic '${newTopic.id}' created successfully. Setting active.")
+        setActiveTopic(Some(newTopic.id))
+        Platform.runLater(footerRef.foreach(_.clearInput()))
+      case Failure(e) =>
+        logger.error(s"Failed to create new topic in category '$category'.", e)
+        DialogUtils.showError(s"Не удалось создать новый топик: ${e.getMessage}", ownerWindow = mainStage)
     }
   }
 
+  def setActiveTopic(topicIdOpt: Option[String]): Unit = {
+    if (isProgrammaticSelectionFlag.get() && currentAppState.activeTopicId == topicIdOpt) { // get()
+      logger.trace(s"Skipping setActiveTopic for ${topicIdOpt.getOrElse("None")} due to programmatic flag and no actual change.")
+      return
+    }
+    val prevActiveTopicId = currentAppState.activeTopicId
+    if (prevActiveTopicId == topicIdOpt) {
+      logger.trace(s"setActiveTopic called for already active topic ID: ${topicIdOpt.getOrElse("None")}. Forcing UI sync.")
+      Platform.runLater(synchronizeUIState())
+      return
+    }
+    logger.info(s"Attempting to set active topic from ${prevActiveTopicId.getOrElse("None")} to ${topicIdOpt.getOrElse("None")}")
+    if (prevActiveTopicId != topicIdOpt) pendingImageData = None
 
-  /** Обрабатывает запрос на удаление топика. */
+    val categoryBeforeChange = activeCategoryName
+
+    topicManager.setActiveTopic(topicIdOpt) match {
+      case Success(_) =>
+        logger.info(s"Active topic ID set to ${topicIdOpt.getOrElse("None")} in StateManager.")
+        val categoryAfterChange = topicIdOpt.flatMap(topicManager.findTopicById).map(_.category).getOrElse(categoryBeforeChange)
+
+        if (categoryBeforeChange != categoryAfterChange) {
+          logger.info(s"Category effectively changed from '$categoryBeforeChange' to '$categoryAfterChange'. Updating Header and AI model.")
+          headerRef.foreach(_.setActiveButton(categoryAfterChange))
+          updateAiServiceWithCurrentModel()
+        } else if (headerRef.exists(_.activeCategoryNameProperty.value != categoryAfterChange)) {
+          logger.info(s"Topic selected in category '$categoryAfterChange', but header shows differently. Syncing header.")
+          headerRef.foreach(_.setActiveButton(categoryAfterChange))
+        }
+
+        Platform.runLater {
+          logger.debug("Scheduling UI synchronization after setActiveTopic.")
+          isProgrammaticSelectionFlag.set(true)
+          try {
+            synchronizeUIState()
+          } finally {
+            isProgrammaticSelectionFlag.set(false)
+            logger.trace("Reset isProgrammaticSelectionFlag to false after UI sync in setActiveTopic.")
+          }
+        }
+      case Failure(e) =>
+        logger.error(s"Failed to set active topic to ${topicIdOpt.getOrElse("None")}.", e)
+        DialogUtils.showError(s"Ошибка при выборе топика: ${e.getMessage}", ownerWindow = mainStage)
+    }
+  }
+
   def deleteTopic(topicId: String): Unit = {
     logger.debug(s"Delete requested for topic ID: $topicId")
-    if (!isRequestInProgress.get()) {
-      if (currentAppState.activeTopicId.contains(topicId)) pendingImageData = None
-      topicManager.findTopicById(topicId) match {
-        case Some(topicToDelete) =>
-          DialogUtils.showConfirmation(s"Удалить топик '${topicToDelete.title}'?", ownerWindow = mainStage).foreach {
-            case ButtonType.OK =>
-              logger.info(s"User confirmed deletion of topic: ${topicToDelete.title} (ID: $topicId)")
-              topicManager.deleteTopic(topicId) match {
-                case Success(nextActiveIdOpt) =>
-                  logger.info(s"Topic '$topicId' deleted successfully. Next active topic ID: ${nextActiveIdOpt.getOrElse("None")}.")
-                  setActiveTopic(nextActiveIdOpt) // Синхронизирует UI
-                case Failure(e) =>
-                  logger.error(s"Failed to delete topic '$topicId'.", e)
-                  showErrorAlert(s"Ошибка удаления топика: ${e.getMessage}")
-              }
-            case _ => logger.debug(s"Deletion cancelled by user for topic $topicId.")
-          }
-        case None =>
-          logger.warn(s"Attempted to delete a non-existent topic with ID: $topicId")
-          showErrorAlert(s"Невозможно удалить: топик с ID $topicId не найден.")
-      }
-    } else {
-      logger.warn("Ignoring 'Delete Topic' action while request is in progress.")
+    if (isRequestInProgress.get()) { // get()
+      logger.warn("Ignoring 'Delete Topic' action: request in progress.")
+      return
+    }
+    if (currentAppState.activeTopicId.contains(topicId)) pendingImageData = None
+
+    topicManager.findTopicById(topicId) match {
+      case Some(topicToDelete) =>
+        DialogUtils.showConfirmation(s"Удалить топик '${topicToDelete.title}'?", ownerWindow = mainStage).foreach {
+          case ButtonType.OK =>
+            logger.info(s"User confirmed deletion of topic: ${topicToDelete.title} (ID: $topicId)")
+            val categoryOfDeletedTopic = topicToDelete.category
+            topicManager.deleteTopic(topicId) match {
+              case Success(nextActiveIdOpt) =>
+                logger.info(
+                  s"Topic '$topicId' deleted. TopicManager suggests next active ID: ${nextActiveIdOpt.getOrElse("None")}."
+                )
+                setActiveTopic(nextActiveIdOpt)
+                Platform.runLater {
+                  if (nextActiveIdOpt.isEmpty && topicManager.getTopicsForCategory(categoryOfDeletedTopic).isEmpty) {
+                    logger.info(s"Category '$categoryOfDeletedTopic' is empty after deletion and no other topic became active. Creating new topic in this category.")
+                    headerRef.foreach(_.setActiveButton(categoryOfDeletedTopic))
+                    startNewTopic()
+                  }
+                }
+              case Failure(e) =>
+                logger.error(s"Failed to delete topic '$topicId'.", e)
+                DialogUtils.showError(s"Ошибка удаления топика: ${e.getMessage}", ownerWindow = mainStage)
+            }
+          case _ => logger.debug(s"Deletion cancelled by user for topic $topicId.")
+        }
+      case None =>
+        logger.warn(s"Attempted to delete a non-existent topic with ID: $topicId")
+        DialogUtils.showError(s"Невозможно удалить: топик с ID $topicId не найден.", ownerWindow = mainStage)
     }
   }
 
-  //</editor-fold>
-
-  //<editor-fold desc="Обработка Файлов и Изображений">
-
-  /** Обработчик перетаскивания файла (вызывается из Footer). */
   private def handleFileDropped(file: File): Unit = {
-    logger.info(s"Handling dropped file: ${file.getName}")
-    if (!isRequestInProgress.get()) {
-      fileManager.foreach(_.readFileAndAppend(file))
-    } else {
-      showErrorAlert("Невозможно обработать файл во время выполнения запроса.")
+    logger.info(s"Handling dropped file: ${file.getName}") // getName()
+    if (isRequestInProgress.get()) { // get()
+      DialogUtils.showError("Невозможно обработать файл во время выполнения запроса.", ownerWindow = mainStage)
+      return
     }
-  }
-
-  /** Обработчик перетаскивания папки (вызывается из Footer). */
-  private def handleDirectoryDropped(dir: File): Unit = {
-    logger.info(s"Handling dropped directory: ${dir.getName}")
-    if (!isRequestInProgress.get()) {
-      fileManager.foreach(_.listDirectoryAndAppend(dir))
-    } else {
-      showErrorAlert("Невозможно обработать папку во время выполнения запроса.")
-    }
-  }
-
-  /** Обработчик вставки изображения из буфера обмена (вызывается из Footer). */
-  private def handleImagePasted(image: Image): Unit = {
-    logger.info(s"Handling pasted image (size: ${image.getWidth}x${image.getHeight}).")
-    if (!isRequestInProgress.get()) {
-      Try {
-        val format = if (image.getUrl != null && (image.getUrl.toLowerCase.endsWith(".jpg") || image.getUrl.toLowerCase.endsWith(".jpeg"))) "jpeg" else "png"
-        val mimeType = s"image/$format"
-        logger.debug(s"Encoding image as $mimeType")
-        val buffer = imageToBytes(image, format)
-        val base64Data = java.util.Base64.getEncoder.encodeToString(buffer)
-        pendingImageData = Some(InlineData(mimeType = mimeType, data = base64Data))
-        logger.info(s"Image encoded to Base64 ($mimeType, size: ${base64Data.length}). Ready for next request.")
-      }.recover {
-        case NonFatal(e) =>
-          logger.error("Failed to process pasted image.", e)
-          showErrorAlert(s"Не удалось обработать вставленное изображение: ${e.getMessage}")
-          pendingImageData = None
+    
+    fileManager.foreach { manager =>
+      // Read file content for processing by the AI model
+      manager.readFileContent(file) match {
+        case Success(content) => 
+          // Calculate file size
+          val fileSizeKB = file.length() / 1024
+          val fileSizeMB = fileSizeKB / 1024.0
+          val fileSizeStr = if (fileSizeMB >= 1.0) f"$fileSizeMB%.2f MB" else s"$fileSizeKB KB"
+          
+          // Prepare preview
+          val contentPreview = if (content.length > 200) {
+            content.substring(0, 200) + "..."
+          } else {
+            content
+          }
+          
+          // Check if file is too large
+          val maxFileSizeKB = 500
+          if (fileSizeKB > maxFileSizeKB) {
+            val warningMsg = s"Файл ${file.getName} ($fileSizeStr) слишком большой. Максимальный размер файла для контекста: $maxFileSizeKB KB."
+            logger.warn(warningMsg)
+            DialogUtils.showWarning(warningMsg, ownerWindow = mainStage)
+          } else {
+            // Show confirmation dialog with preview
+            val confirmationMsg = 
+              s"""Добавить файл "${file.getName}" ($fileSizeStr) в контекст для AI модели?
+                 |
+                 |Предпросмотр содержимого:
+                 |```
+                 |$contentPreview
+                 |```
+                 |
+                 |Содержимое файла будет отправлено в AI модель с вашим следующим запросом.""".stripMargin
+                 
+            DialogUtils.showConfirmation(confirmationMsg, ownerWindow = mainStage).foreach {
+            case ButtonType.OK => 
+              // User confirmed, add file content to pending context with proper escaping
+              val escapedContent = escapeFileContent(content)
+              appendToFileContext(file.getName, escapedContent)
+              
+              // Also append formatted text to UI footer
+              manager.readFileAndAppendToFooter(file)
+              
+              // Show feedback to user
+              Platform.runLater {
+                DialogUtils.showInfo(s"Файл ${file.getName} добавлен в контекст. Содержимое будет отправлено с вашим следующим запросом.", ownerWindow = mainStage)
+              }
+            case _ => 
+              logger.debug(s"User declined to add file ${file.getName} to context")
+            }
+          }
+        case Failure(e) =>
+          logger.error(s"Failed to read file ${file.getName} for context: ${e.getMessage}", e)
+          DialogUtils.showError(s"Не удалось прочитать файл ${file.getName} для контекста: ${e.getMessage}", ownerWindow = mainStage)
       }
-    } else {
-      showErrorAlert("Невозможно обработать изображение во время выполнения другого запроса.")
     }
   }
 
-  /** Преобразует JavaFX Image в массив байт заданного формата (png/jpeg). */
-  private def imageToBytes(image: Image, format: String): Array[Byte] = {
-    val outputStream = new ByteArrayOutputStream()
-    ImageIO.write(SwingFXUtils.fromFXImage(image, null), format, outputStream)
-    outputStream.toByteArray
+  private def handleDirectoryDropped(dir: File): Unit = {
+    logger.info(s"Handling dropped directory: ${dir.getName}") // getName()
+    if (isRequestInProgress.get()) { // get()
+      DialogUtils.showError("Невозможно обработать папку во время выполнения запроса.", ownerWindow = mainStage)
+      return
+    }
+    
+    // Only display folder structure in footer, no context for AI yet
+    // Could be extended to add folder structure to context as well
+    fileManager.foreach(_.attachFolderContext())
   }
 
-  //</editor-fold>
+  private def handleImagePasted(image: JFXImage): Unit = {
+    logger.info(s"Handling pasted image (size: ${image.getWidth}x${image.getHeight}).")
+    if (isRequestInProgress.get()) { // get()
+      DialogUtils.showError("Невозможно обработать изображение во время выполнения другого запроса.", ownerWindow = mainStage)
+      return
+    }
+    Try {
+      val format = if (image.getUrl != null && (image.getUrl.toLowerCase().endsWith(".jpg") || image.getUrl.toLowerCase().endsWith(".jpeg"))) "jpeg" else "png"
+      val mimeType = s"image/$format"
+      logger.debug(s"Encoding image as $mimeType")
+      val buffer = Using.resource(new ByteArrayOutputStream()) { baos =>
+        ImageIO.write(SwingFXUtils.fromFXImage(image, null), format, baos)
+        baos.toByteArray
+      }
+      val base64Data = java.util.Base64.getEncoder.encodeToString(buffer) // getEncoder()
+      pendingImageData = Some(InlineData(mimeType = mimeType, data = base64Data))
+      logger.info(s"Image encoded to Base64 ($mimeType, data length: ${base64Data.length}). Ready for next request.")
+      Platform.runLater {
+        val placeholder = s"\n[Изображение (${image.getWidth}x${image.getHeight}) готово к отправке с текстом]\n"
+        appendToInputArea(placeholder)
+      }
+    }.recover {
+      case NonFatal(e) =>
+        logger.error("Failed to process pasted image.", e)
+        DialogUtils.showError(s"Не удалось обработать вставленное изображение: ${e.getMessage}", ownerWindow = mainStage)
+        pendingImageData = None
+        clearFileContext()
+    }
+  }
 
-  //<editor-fold desc="Выполнение AI Запроса и Обработка Результатов">
-
-  /**
-   * Запускает выполнение AI запроса. Учитывает pendingImageData.
-   */
   private def executeRequest(
                               originalRequestText: String,
                               categoryHint: Option[String],
                               apiKey: String,
                               imageDataOpt: Option[InlineData]
                             ): Unit = {
-
-    if (isRequestInProgress.compareAndSet(false, true)) {
-      var turnId: String = ""
-      Platform.runLater {
-        updateFooterState(locked = true)
-        val displayText = if (imageDataOpt.isDefined && originalRequestText.nonEmpty) {
-          s"$originalRequestText\n[Изображение добавлено]"
-        } else if (imageDataOpt.isDefined) {
-          "[Изображение добавлено]"
-        } else {
-          originalRequestText
-        }
-        turnId = ResponseArea.addRequestTurn(displayText)
-
-        if (turnId.nonEmpty && !turnId.startsWith("error-")) {
-          footerRef.foreach(_.clearInput())
-          ResponseArea.showLoadingIndicatorForRequest(turnId)
-          logger.debug(s"UI prepared for request. Turn ID: $turnId. Image included: ${imageDataOpt.isDefined}")
-          submitRequestAsync(originalRequestText, categoryHint, apiKey, imageDataOpt, turnId)
-        } else {
-          val errorMsg = s"Внутренняя ошибка UI при создании хода запроса (ID: $turnId)."
-          logger.error(errorMsg)
-          showErrorAlert(errorMsg)
-          isRequestInProgress.set(false)
-          updateFooterState(locked = false)
-        }
-      }
-    } else {
+    if (!isRequestInProgress.compareAndSet(false, true)) {
       logger.warn("executeRequest called while another request is already in progress. Aborting.")
-      showErrorAlert("Предыдущий запрос еще выполняется.")
+      DialogUtils.showError("Предыдущий запрос еще выполняется.", ownerWindow = mainStage)
+      return
+    }
+    var turnIdForUI: String = ""
+    Platform.runLater {
+      updateFooterState(locked = true)
+      val displayRequestText = imageDataOpt match {
+        case Some(_) if originalRequestText.nonEmpty => s"$originalRequestText\n[Изображение прикреплено]"
+        case Some(_)                                 => "[Изображение прикреплено]"
+        case None                                    => originalRequestText
+      }
+      turnIdForUI = ResponseArea.addRequestTurn(displayRequestText)
+      if (turnIdForUI.nonEmpty && !turnIdForUI.startsWith("error-")) {
+        footerRef.foreach(_.clearInput())
+        ResponseArea.showLoadingIndicatorForRequest(turnIdForUI)
+        logger.debug(s"UI prepared for request. Turn ID: $turnIdForUI. Image included: ${imageDataOpt.isDefined}")
+        // Get file context if any is available
+        val fileContextOpt = if (pendingFileContext.nonEmpty) Some(pendingFileContext.toString()) else None
+        submitRequestAsync(originalRequestText, categoryHint, apiKey, imageDataOpt, fileContextOpt, turnIdForUI)
+      } else {
+        val errorMsg = s"Внутренняя ошибка UI при создании хода запроса (ID: $turnIdForUI)."
+        logger.error(errorMsg)
+        DialogUtils.showError(errorMsg, ownerWindow = mainStage)
+        isRequestInProgress.set(false)
+        updateFooterState(locked = false)
+      }
     }
   }
 
-  /** Асинхронно отправляет запрос к AI и обрабатывает результат */
   private def submitRequestAsync(
                                   originalRequestText: String,
                                   categoryHint: Option[String],
                                   apiKey: String,
                                   imageDataOpt: Option[InlineData],
-                                  turnId: String
+                                  fileContextOpt: Option[String],
+                                  uiTurnId: String
                                 ): Unit = {
-    logger.info(s"Submitting request via RequestExecutionManager. TurnID: $turnId, CategoryHint: $categoryHint, Image: ${imageDataOpt.isDefined}")
-    val resultFuture: Future[(String, Dialog)] = requestExecutionManager.submitRequest(
-      originalRequestText, categoryHint, apiKey, imageDataOpt
+    logger.info(
+      s"Submitting request via RequestExecutionManager. UITurnID: $uiTurnId, CategoryHint: $categoryHint, Image: ${imageDataOpt.isDefined}, FileContext: ${fileContextOpt.isDefined}"
     )
-
+    val resultFuture: Future[(String, Dialog)] = requestExecutionManager.submitRequest(
+      originalRequestText,
+      categoryHint,
+      apiKey,
+      imageDataOpt,
+      fileContextOpt
+    )
+    
+    // Clear file context after submitting the request
+    clearFileContext()
     resultFuture.onComplete { resultTry =>
       Platform.runLater {
         isRequestInProgress.set(false)
         updateFooterState(locked = false)
-
         resultTry match {
           case Success((topicId, resultDialog)) =>
-            handleSuccessfulAiResponse(topicId, resultDialog, turnId)
+            handleSuccessfulAiResponse(topicId, resultDialog, uiTurnId)
           case Failure(exception) =>
-            handleFailedAiResponse(exception, turnId)
+            handleFailedAiResponse(exception, uiTurnId)
         }
       }
-      pendingImageData = None
     }
   }
 
-
-  /** Обрабатывает успешный ответ от AI. Вызывается из FX потока. */
-  private def handleSuccessfulAiResponse(topicId: String, resultDialog: Dialog, turnId: String): Unit = {
-    logger.info(s"Request successful for topic ID '$topicId'. Updating UI for turn ID '$turnId'.")
-    ResponseArea.addResponseTurn(turnId, resultDialog.response)
-    val currentCategory = activeCategoryName
-    updateHistoryPanel(currentCategory, Some(topicId))
-
-    try {
-      if (isProgrammaticSelectionFlag.compareAndSet(false, true)) {
-        logger.debug("Setting programmatic selection flag TRUE before HistoryPanel.selectTopic (on success)")
-        historyPanelRef.foreach(_.selectTopic(topicId))
-      } else {
-        logger.warn("Could not set programmatic selection flag (already true?) before HistoryPanel.selectTopic (on success)")
-      }
-    } finally {
-      isProgrammaticSelectionFlag.set(false)
-      logger.debug("Reset programmatic selection flag to FALSE after HistoryPanel.selectTopic (on success)")
+  private def handleSuccessfulAiResponse(topicId: String, resultDialog: Dialog, uiTurnId: String): Unit = {
+    logger.info(s"Request successful for topic ID '$topicId'. Updating UI for turn ID '$uiTurnId'.")
+    ResponseArea.addResponseTurn(uiTurnId, resultDialog.response)
+    if (!currentAppState.activeTopicId.contains(topicId)) {
+      setActiveTopic(Some(topicId))
+    } else {
+      val currentCategory = activeCategoryName
+      updateHistoryPanel(currentCategory, Some(topicId))
     }
   }
 
-  /** Обрабатывает ошибку выполнения AI запроса. Вызывается из FX потока. */
-  private def handleFailedAiResponse(exception: Throwable, turnId: String): Unit = {
-    logger.error(s"Request failed for turn ID '$turnId': ${exception.getMessage}", exception)
-    val errorMsg = s"Ошибка: ${exception.getMessage}"
-    ResponseArea.showErrorForRequest(turnId, errorMsg)
-    showErrorAlert(s"Ошибка выполнения запроса:\n${exception.getMessage}")
+  private def handleFailedAiResponse(exception: Throwable, uiTurnId: String): Unit = {
+    val message = Option(exception.getMessage).getOrElse("Неизвестная ошибка AI сервиса")
+    logger.error(s"Handling failed AI response for UI turn ID '$uiTurnId': $message", exception)
+    val displayMessage = if (message.contains("429") && message.toLowerCase.contains("quota")) {
+      "Достигнут лимит запросов к AI (ошибка 429). Пожалуйста, проверьте ваши квоты или попробуйте позже."
+    } else {
+      s"Ошибка от AI сервиса: $message"
+    }
+    ResponseArea.showErrorForRequest(uiTurnId, displayMessage)
   }
 
-  //</editor-fold>
-
-  //<editor-fold desc="Настройки и их Обновление">
-
-  /** Показывает модальное окно настроек. */
   private def showSettingsWindow(): Unit = {
     mainStage.foreach { owner =>
       logger.debug("Showing settings window...")
       val state = currentAppState
-      val currentKey = getApiKey().getOrElse("")
-
+      val currentKey = getApiKey().getOrElse("") // () добавлены
       val settings = CurrentSettings(
         apiKey = currentKey,
         model = state.globalAiModel,
-        // fontFamily и fontSize удалены из CurrentSettings
         availableModels = state.availableModels,
         buttonMappings = presetManager.getButtonMappings,
         defaultPresets = presetManager.getDefaultPresets,
         customPresets = presetManager.getCustomPresets
       )
-
       val settingsView = new SettingsView(owner, this, settings)
       settingsView.showAndWait()
-
-      logger.debug("Settings window closed. Updating relevant states/UI.")
+      logger.debug("Settings window closed. Applying relevant changes.")
       updateAiServiceWithCurrentModel()
-      synchronizeUIState() // Синхронизируем UI
+      Platform.runLater {
+        synchronizeUIState()
+      }
     }
   }
 
-  /** Обновляет API ключ. Вызывается из SettingsView. */
   def updateApiKey(newApiKey: String): Unit = {
     val trimmedKey = newApiKey.trim
-    val currentStoredKey = getApiKey()
-    val keyChanged = currentStoredKey.getOrElse("") != trimmedKey
+    val currentStoredKey = getApiKey() // () добавлены
+    if (currentStoredKey.getOrElse("") == trimmedKey) {
+      logger.debug("API Key submitted is the same as stored. No update performed.")
+      return
+    }
 
-    if (keyChanged) {
-      logger.info("API Key change detected. Updating storage and fetching models...")
-      val saveOrDeleteAction: Try[Unit] = if (trimmedKey.isEmpty) CredentialsService.deleteApiKey() else CredentialsService.saveApiKey(trimmedKey)
+    logger.info("API Key change detected. Attempting to save/delete...")
+    val saveOrDeleteAction = if (trimmedKey.isEmpty) CredentialsService.deleteApiKey() else CredentialsService.saveApiKey(trimmedKey)
 
-      saveOrDeleteAction match {
-        case Success(_) =>
-          logger.info(s"API Key ${if (trimmedKey.isEmpty) "deleted" else "saved"} successfully.")
-          fetchModelsAndUpdateState().andThen { case _ =>
-            updateAiServiceWithCurrentModel()
+    saveOrDeleteAction match {
+      case Success(_) =>
+        logger.info(s"API Key ${if (trimmedKey.isEmpty) "deleted" else "saved"} successfully.")
+        val processingChainFuture: Future[Unit] = fetchModelsAndUpdateState().map { _ => // () добавлены
+          logger.info("Models fetched/cleared and AppState updated after API key change.")
+          updateAiServiceWithCurrentModel() // () добавлены
+        }
+        processingChainFuture.onComplete {
+          case Success(_) =>
+            logger.info("API key processing chain (fetch models, update AI service) completed successfully. Syncing UI.")
             Platform.runLater(synchronizeUIState())
-          }
-        case Failure(e) =>
-          logger.error("Failed to save or delete API key.", e)
-          showErrorAlert(s"Не удалось ${if (trimmedKey.isEmpty) "удалить" else "сохранить"} API ключ: ${e.getMessage}")
-      }
-    } else {
-      logger.debug("API Key submitted is the same as the stored one. No update needed.")
+          case Failure(e) =>
+            logger.error(s"Error in API key processing chain (likely fetchModels): ${e.getMessage}. Syncing UI with current (possibly stale) state.", e)
+            Platform.runLater(synchronizeUIState())
+        }
+      case Failure(e) =>
+        logger.error("Failed to save or delete API key in CredentialsService.", e)
+        DialogUtils.showError(s"Не удалось ${if (trimmedKey.isEmpty) "удалить" else "сохранить"} API ключ: ${e.getMessage}", ownerWindow = mainStage)
     }
   }
 
-  /** Обновляет глобальную модель AI. Вызывается из SettingsView. */
+
   def updateGlobalAIModel(newModelName: String): Try[Unit] = {
     val trimmedModelName = newModelName.trim
     if (trimmedModelName.isEmpty) {
@@ -625,52 +671,74 @@ class MainController(implicit system: ActorSystem[?]) {
       logger.error(msg)
       return Failure(new IllegalArgumentException(msg))
     }
-    val result = stateManager.updateState { currentState =>
-      if (currentState.globalAiModel == trimmedModelName) currentState
-      else if (currentState.availableModels.exists(_.name == trimmedModelName)) {
-        logger.info(s"Updating global AI model to '$trimmedModelName'.")
-        currentState.copy(globalAiModel = trimmedModelName)
+
+    logger.info(s"Attempting to update global AI model in AppState to '$trimmedModelName'.")
+    
+    // Fetch current state before the update to be able to compare before/after
+    val currentState = stateManager.getState
+    
+    // Check if model exists in available models before attempting the update
+    if (!currentState.availableModels.exists(_.name == trimmedModelName)) {
+      val availableNames = currentState.availableModels.map(m => s"'${m.name}'").mkString(", ")
+      val errorMsg = s"Модель '$trimmedModelName' не найдена среди доступных: [$availableNames]."
+      logger.error(s"Cannot set global model: $errorMsg")
+      return Failure(new IllegalArgumentException(errorMsg))
+    }
+    
+    // Only proceed with update if the model name has changed
+    if (currentState.globalAiModel == trimmedModelName) {
+      logger.debug("Global model is already set to '{}'. No change to AppState.", trimmedModelName)
+      return Success(())
+    }
+    
+    val result = stateManager.updateState { state =>
+      logger.info(s"Updating global AI model in AppState from '${state.globalAiModel}' to '$trimmedModelName'.")
+      state.copy(globalAiModel = trimmedModelName)
+    }
+    
+    result.foreach { _ => 
+      // Validate that the update was successful by checking the current state
+      val updatedState = stateManager.getState
+      if (updatedState.globalAiModel == trimmedModelName) {
+        logger.info(s"Successfully updated global AI model to '$trimmedModelName'.")
+        // Update AI service with the new model
+        updateAiServiceWithCurrentModel()
+        // Update UI to reflect changes
+        Platform.runLater(synchronizeUIState())
       } else {
-        val availableNames = currentState.availableModels.map(m => s"'${m.name}'").mkString(", ")
-        val errorMsg = s"Модель '$trimmedModelName' не найдена среди доступных: [$availableNames]."
-        logger.error(s"Cannot set global model: $errorMsg")
-        throw new IllegalArgumentException(errorMsg)
+        logger.warn(s"State update succeeded but global AI model doesn't match. Expected '$trimmedModelName', got '${updatedState.globalAiModel}'.")
       }
     }
-    result.foreach(_ => updateAiServiceWithCurrentModel())
+    
+    result.failed.foreach { error =>
+      logger.error(s"Failed to update global AI model to '$trimmedModelName'", error)
+    }
+    
     result
   }
 
-  /* <<< Метод updateFontSettings полностью удален >>> */
-
-  // Делегирование управления пресетами PresetManager
   def saveCustomPreset(preset: PromptPreset): Try[Unit] = presetManager.saveCustomPreset(preset)
   def saveDefaultPreset(preset: PromptPreset): Try[Unit] = presetManager.saveDefaultPreset(preset)
   def deleteCustomPreset(presetName: String): Try[Unit] = presetManager.deleteCustomPreset(presetName)
   def updateButtonMappings(newMappings: Map[String, String]): Try[Unit] = presetManager.updateButtonMappings(newMappings)
 
-  //</editor-fold>
+  private def getApiKey(): Option[String] = CredentialsService.loadApiKey() // () добавлены
+  private def currentAppState: AppState = stateManager.getState // () добавлены
 
-  //<editor-fold desc="Вспомогательные Методы">
-
-  /** Возвращает текущий API ключ из CredentialsService. */
-  private def getApiKey(): Option[String] = CredentialsService.loadApiKey()
-
-  /** Возвращает текущее состояние AppState. */
-  private def currentAppState: AppState = stateManager.getState
-
-  /** Определяет имя активной категории. */
   private def activeCategoryName: String = {
-    currentAppState.activeTopicId
-      .flatMap(topicManager.findTopicById)
-      .map(_.category)
+    headerRef.flatMap(h => Option(h.activeCategoryNameProperty).map(_.value))
       .filter(Header.categoryButtonNames.contains)
-      .getOrElse(Header.categoryButtonNames.headOption.getOrElse("Global"))
+      .getOrElse {
+        currentAppState.activeTopicId // Используем currentAppState напрямую
+          .flatMap(topicManager.findTopicById)
+          .map(_.category)
+          .filter(Header.categoryButtonNames.contains)
+          .getOrElse(Header.categoryButtonNames.headOption.getOrElse("Global"))
+      }
   }
 
-  /** Асинхронно загружает модели и обновляет состояние. */
-  private def fetchModelsAndUpdateState(): Future[Unit] = {
-    getApiKey() match {
+  private def fetchModelsAndUpdateState(): Future[Unit] = { // () добавлены
+    getApiKey() match { // () добавлены
       case Some(apiKey) if apiKey.nonEmpty =>
         logger.info("Attempting to fetch available AI models...")
         modelFetchingService.fetchAvailableModels(apiKey).transformWith {
@@ -678,70 +746,173 @@ class MainController(implicit system: ActorSystem[?]) {
             logger.info(s"Successfully fetched ${fetchedModels.size} AI models.")
             val sortedFetchedModels = fetchedModels.sortBy(_.displayName)
             val updateTry = stateManager.updateState { currentState =>
-              if (currentState.availableModels != sortedFetchedModels) {
-                val currentGlobalModel = currentState.globalAiModel
-                val currentGlobalModelExists = sortedFetchedModels.exists(_.name == currentGlobalModel)
-                val newGlobalModel = if (currentGlobalModelExists) currentGlobalModel else sortedFetchedModels.headOption.map(_.name).getOrElse("")
-                logger.info(s"Updating available models list in state. New global model set to '$newGlobalModel'.")
-                // Убраны поля шрифта из AppState
+              val currentGlobalModelIsValid = sortedFetchedModels.exists(_.name == currentState.globalAiModel)
+              val newGlobalModel =
+                if (currentGlobalModelIsValid) currentState.globalAiModel
+                else sortedFetchedModels.headOption.map(_.name).getOrElse("")
+
+              if (currentState.availableModels != sortedFetchedModels || currentState.globalAiModel != newGlobalModel) {
+                logger.info(s"Updating available models list and/or global model in AppState. New global model: '$newGlobalModel'.")
                 currentState.copy(availableModels = sortedFetchedModels, globalAiModel = newGlobalModel)
               } else {
-                logger.debug("Fetched models are the same as current in state. No state update needed.")
+                logger.debug("Fetched models and global model are the same as current in AppState. No state update needed.")
                 currentState
               }
             }
             Future.fromTry(updateTry)
           case Failure(fetchError) =>
             logger.error("Failed to fetch AI models.", fetchError)
-            val clearTry = stateManager.updateState(s => if(s.availableModels.nonEmpty) s.copy(availableModels = List.empty, globalAiModel = "") else s)
-            Future.fromTry(clearTry.recoverWith{ case _ => Failure(fetchError)})
+            val clearTry = stateManager.updateState(s =>
+              if (s.availableModels.nonEmpty || s.globalAiModel.nonEmpty) s.copy(availableModels = List.empty, globalAiModel = "") else s
+            )
+            Future.fromTry(clearTry.recoverWith { case _ => Failure(fetchError) })
         }
       case _ =>
-        logger.warn("Cannot fetch models: API Key is not available.")
-        val clearTry = stateManager.updateState(s => if(s.availableModels.nonEmpty) s.copy(availableModels = List.empty, globalAiModel = "") else s)
+        logger.warn("Cannot fetch models: API Key is not available. Clearing models in AppState.")
+        val clearTry = stateManager.updateState(s =>
+          if (s.availableModels.nonEmpty || s.globalAiModel.nonEmpty) s.copy(availableModels = List.empty, globalAiModel = "") else s
+        )
         Future.fromTry(clearTry)
     }
   }
 
+  // Helper methods for file context management
+  private def appendToFileContext(fileName: String, content: String): Unit = {
+    // Format file content with clear structure and proper line endings
+    val formattedContent = s"""
+File: ${sanitizeFileName(fileName)}
+```
+$content
+```
 
-  /** Обновляет модель в AIService. */
-  private def updateAiServiceWithCurrentModel(): Unit = {
-    val state = currentAppState
-    val category = activeCategoryName
-    val preset = presetManager.findActivePresetForButton(category)
-    val modelToUseOpt: Option[String] = preset.modelOverride
-      .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
-      .orElse(state.availableModels.headOption.map(_.name))
-
-    modelToUseOpt match {
-      case Some(modelToUse) =>
-        if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
-          val fallbackModel = state.availableModels.head.name
-          logger.warn(s"Model '$modelToUse' (determined for category '$category') not found in available models. Falling back to '$fallbackModel'.")
-          Try(aiService.updateModel(fallbackModel)).failed.foreach(e => logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e))
-        } else {
-          logger.info(s"Setting AI service model to: '$modelToUse' (for category '$category')")
-          Try(aiService.updateModel(modelToUse)).failed.foreach(e => logger.error(s"Failed to update AIService model to '$modelToUse'", e))
-        }
-      case None =>
-        logger.error("Failed to determine any AI model to use. AIService model not updated.")
+"""
+    pendingFileContext.append(formattedContent)
+    logger.debug(s"Added content from $fileName to file context. Total context size: ${pendingFileContext.length}")
+    
+    // Log context for debugging
+    if (logger.isDebugEnabled) {
+      val contextPreview = if (pendingFileContext.length > 500) {
+        pendingFileContext.toString.substring(0, 500) + "... (truncated)"
+      } else {
+        pendingFileContext.toString
+      }
+      logger.debug(s"Current file context:\n$contextPreview")
+    }
+  }
+  
+  /**
+   * Sanitizes filename to prevent possible injection or formatting issues
+   */
+  private def sanitizeFileName(fileName: String): String = {
+    // Remove potential problematic characters
+    fileName.replaceAll("[\\n\\r\\t`]", "")
+  }
+  
+  /**
+   * Escapes special characters in file content
+   * to prevent issues with JSON formatting or markdown interpretation
+   */
+  private def escapeFileContent(content: String): String = {
+    // Replace backslashes with double backslashes to preserve them in JSON
+    // Replace backticks to prevent breaking markdown code blocks
+    content
+      .replace("\\", "\\\\")
+      .replace("\b", "\\b")
+      .replace("\f", "\\f")
+      .replace("\r", "\\r")
+  }
+  
+  private def clearFileContext(): Unit = {
+    if (pendingFileContext.nonEmpty) {
+      logger.debug(s"Clearing file context (size was: ${pendingFileContext.length})")
+      pendingFileContext.clear()
     }
   }
 
-  /** Валидирует длину текста запроса. */
+  private def updateAiServiceWithCurrentModel(): Unit = {
+    val state = currentAppState
+    val currentActiveCat = activeCategoryName
+    val preset = presetManager.findActivePresetForButton(currentActiveCat)
+
+    logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
+    logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}, maxTokens=${preset.maxOutputTokens}")
+    logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
+    logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
+
+    // Get model name to use, with priority to preset override, then global model, then first available model
+    val modelToUseOpt: Option[String] = preset.modelOverride
+      .filter(_.nonEmpty)
+      .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
+      .orElse(state.availableModels.headOption.map(_.name).filter(_.nonEmpty))
+
+    // Special handling for Flash model variants
+    val finalModelToUseOpt = modelToUseOpt.map { modelName =>
+      val isFlashVariant = modelName.contains("flash")
+      val modelExists = state.availableModels.exists(_.name == modelName)
+      
+      if (isFlashVariant && !modelExists) {
+        // Try to find a suitable Flash model from available models
+        val availableFlashModels = state.availableModels.filter(m => m.name.contains("flash"))
+        if (availableFlashModels.nonEmpty) {
+          logger.info(s"Flash model '$modelName' not found. Using alternative Flash model: '${availableFlashModels.head.name}'")
+          availableFlashModels.head.name
+        } else {
+          // If no Flash models available, use the original model name (will be handled by fallback logic)
+          modelName
+        }
+      } else {
+        modelName
+      }
+    }
+
+    finalModelToUseOpt match {
+      case Some(modelToUse) =>
+        logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.currentModelRef.get()}'.")
+        
+        // Check if the model exists in available models
+        if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
+          val fallbackModel = state.availableModels.head.name
+          logger.warn(
+            s"Model '$modelToUse' (determined for category '$currentActiveCat') not found in available models. Falling back to '$fallbackModel'."
+          )
+          
+          // Update model in AIService
+          Try(aiService.updateModel(fallbackModel)) match {
+            case Success(_) => 
+              logger.info(s"Successfully updated AIService model to fallback '$fallbackModel'")
+              // If we're using a fallback and the global model doesn't match, update it
+              if (state.globalAiModel == modelToUse) {
+                logger.info(s"Updating global model from '$modelToUse' to fallback '$fallbackModel'")
+                stateManager.updateState(s => s.copy(globalAiModel = fallbackModel))
+              }
+            case Failure(e) =>
+              logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e)
+          }
+        } else {
+          logger.info(s"Setting AI service model to: '$modelToUse' (for category '$currentActiveCat')")
+          Try(aiService.updateModel(modelToUse)) match {
+            case Success(_) => 
+              logger.info(s"Successfully updated AIService model to '$modelToUse'")
+              // Ensure model is saved in state if it's different from current global model
+              if (preset.modelOverride.isEmpty && state.globalAiModel != modelToUse) {
+                logger.info(s"Synchronizing global model with active model: '$modelToUse'")
+                stateManager.updateState(s => s.copy(globalAiModel = modelToUse))
+              }
+            case Failure(e) =>
+              logger.error(s"Failed to update AIService model to '$modelToUse'", e)
+          }
+        }
+      case None =>
+        logger.error(s"Failed to determine any AI model to use for category '$currentActiveCat'. AIService model not updated. This can happen if no global model is set and no presets override it, and the available models list is empty.")
+    }
+  }
+
   private def validateInputLength(text: String): Option[String] = {
-    val maxLength = 30000 // Примерный лимит
+    val maxLength = 30000
     if (text.length > maxLength) {
-      Some(f"Запрос слишком длинный (${text.length}%,d / $maxLength%,d символов).")
+      Some(f"Запрос слишком длинный (${text.length}%,d / $maxLength%,d символов). Пожалуйста, сократите его.")
     } else {
       None
     }
   }
-
-  /** Показывает стандартное диалоговое окно с сообщением об ошибке. */
-  private def showErrorAlert(message: String): Unit = {
-    DialogUtils.showError(message, mainStage)
-  }
-  //</editor-fold>
-
 }
