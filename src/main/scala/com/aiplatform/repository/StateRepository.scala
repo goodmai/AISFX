@@ -9,9 +9,9 @@ import scala.util.{Try, Success, Failure}
 import scala.util.control.NonFatal
 
 object StateRepository {
-  private val logger = LoggerFactory.getLogger(getClass)
+  private val logger                  = LoggerFactory.getLogger(getClass)
   private val STATE_FILE_NAME: String = "app_state.json"
-  private val STATE_FILE_PATH: Path = Paths.get(STATE_FILE_NAME)
+  private val STATE_FILE_PATH: Path   = Paths.get(STATE_FILE_NAME)
 
   /**
    * Сохраняет состояние приложения в JSON файл.
@@ -23,7 +23,12 @@ object StateRepository {
   def saveState(state: AppState): Try[Unit] = {
     Try {
       val json = JsonUtil.serialize(state)
-      Files.writeString(STATE_FILE_PATH, json, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+      Files.writeString(STATE_FILE_PATH,
+                        json,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.TRUNCATE_EXISTING
+      )
       logger.info("Application state saved successfully to {}", STATE_FILE_PATH.toAbsolutePath)
       () // Возвращаем Unit в Success
     }.recoverWith {
@@ -68,6 +73,6 @@ object StateRepository {
       case e: Throwable => // Ловим все остальные ошибки (ошибка чтения, ошибка парсинга JSON и т.д.)
         logger.error(s"Failed to load or parse state from ${STATE_FILE_PATH.toAbsolutePath}. Using initial state.", e)
         Success(AppState.initialState) // При любой другой ошибке - возвращаем Success с начальным состоянием
-    }.get // Теперь .get вызывается на Success[AppState], что безопасно и корректно
+    }.get                              // Теперь .get вызывается на Success[AppState], что безопасно и корректно
   }
 }
