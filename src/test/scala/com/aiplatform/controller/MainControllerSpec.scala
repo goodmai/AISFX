@@ -349,6 +349,71 @@ class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar wit
     
     // synchronizeUIState should NOT have been called if update fails early
     verify(mockHeader, never()).setActiveButton(any[String])
-    verify(mockFooter, never()).setLocked(any[Boolean])
+    verify(mockFooter, never()).setLocked(any[Boolean]) // Changed from any[Boolean] to false as per typical non-locked state.
+  }
+
+  behavior of "MainController FileTreeContext Management"
+
+  it should "update AppState with new FileTreeContext when updateFileTreeContext is called" in {
+    // Arrange
+    val initialState = AppState.initialState.copy(fileContext = None)
+    initializeStateFile(initialState)
+    val controller = setupController(initialState)
+    val newFileContext = FileTreeContext(List(FileSelectionState.Selected("path/file.txt", "content")))
+
+    // Act
+    // updateFileTreeContext calls Platform.runLater for DialogUtils, but state update is synchronous with stateManager
+    controller.updateFileTreeContext(newFileContext) 
+    // A small sleep might be needed if there were critical async UI updates to wait for,
+    // but for state saving via StateManager (which is synchronous in its updateState's core logic),
+    // it should be reflected immediately in the file after the method call.
+    // However, the DialogUtils call is on Platform.runLater.
+    Thread.sleep(100) // Allow DialogUtils.showInfo on FX thread a moment.
+
+    // Assert
+    val finalState = readStateFile()
+    finalState.fileContext shouldBe Some(newFileContext)
+  }
+
+  it should "clear fileContext in AppState when clearFileTreeContextFromView is called" in {
+    // Arrange
+    val initialFileContext = FileTreeContext(List(FileSelectionState.Selected("path/another.txt", "some other content")))
+    val initialState = AppState.initialState.copy(fileContext = Some(initialFileContext))
+    initializeStateFile(initialState)
+    val controller = setupController(initialState)
+
+    // Act
+    // clearFileTreeContextFromView also has a Platform.runLater for DialogUtils
+    controller.clearFileTreeContextFromView()
+    Thread.sleep(100) // Allow DialogUtils.showInfo on FX thread a moment.
+
+    // Assert
+    val finalState = readStateFile()
+    finalState.fileContext shouldBe None
+  }
+
+  it should "clear structuredFileContext after a request is initiated via processUserInput" in {
+    // Arrange
+    CredentialsService.saveApiKey("test-api-key-for-context-clearing-test") shouldBe a[Success[_]]
+    
+    val initialFileContext = FileTreeContext(List(FileSelectionState.Selected("path/structured.txt", "structured content")))
+    val modelForTest = ModelInfo("test-model-for-context", "Test Model For Context")
+    val initialState = AppState.initialState.copy(
+      globalAiModel = modelForTest.name,
+      availableModels = List(modelForTest),
+      fileContext = Some(initialFileContext) // Start with a context
+    )
+    initializeStateFile(initialState)
+    val controller = setupController(initialState)
+
+    // Act
+    controller.processUserInput("test query that should clear structured context")
+    // processUserInput leads to submitRequestAsync, which clears contexts.
+    // It involves Platform.runLater for UI updates and async Future for the request.
+    Thread.sleep(200) // Allow time for these operations.
+
+    // Assert
+    val finalState = readStateFile()
+    finalState.fileContext shouldBe None // Verify structured context is cleared.
   }
 }

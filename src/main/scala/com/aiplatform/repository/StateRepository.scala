@@ -2,7 +2,7 @@
 package com.aiplatform.repository
 
 import com.aiplatform.model.AppState
-import com.aiplatform.util.JsonUtil // Используем наш обновленный JsonUtil
+import com.aiplatform.util.JsonUtil
 import java.nio.file.{Files, Path, Paths, StandardOpenOption, NoSuchFileException, StandardCopyOption}
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -16,60 +16,59 @@ object StateRepository {
   private val STATE_FILE_PATH: Path = Paths.get(STATE_FILE_NAME)
 
   /**
-   * Сохраняет состояние приложения в JSON файл.
-   * Использует JsonUtil для сериализации.
+   * Saves the application state to a JSON file.
+   * Uses JsonUtil for serialization.
    *
-   * @param state Текущее состояние приложения.
-   * @return Success(()) если сохранение успешно, Failure(exception) в случае ошибки.
+   * @param state Current application state.
+   * @return Success(()) if saving is successful, Failure(exception) in case of an error.
    */
   def saveState(state: AppState): Try[Unit] = {
     Try {
       val json = JsonUtil.serialize(state)
       Files.writeString(STATE_FILE_PATH, json, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
       logger.info("Application state saved successfully to {}", STATE_FILE_PATH.toAbsolutePath)
-      () // Возвращаем Unit в Success
+      () // Return Unit in Success
     }.recoverWith {
       case NonFatal(e) =>
         logger.error(s"Failed to save application state to ${STATE_FILE_PATH.toAbsolutePath}", e)
-        Failure(new Exception(s"Ошибка сохранения состояния: ${e.getMessage}", e)) // Оборачиваем ошибку
+        Failure(new Exception(s"Error saving state: ${e.getMessage}", e)) // Wrap the error
     }
   }
 
   /**
-   * Загружает состояние приложения из JSON файла.
-   * Возвращает начальное состояние AppState.initialState только в случае
-   * отсутствия файла или критической ошибки чтения/десериализации.
+   * Loads the application state from a JSON file.
+   * Returns AppState.initialState only if the file is missing or a critical read/deserialization error occurs.
    *
-   * @return Загруженное или начальное состояние AppState.
+   * @return Loaded or initial AppState.
    */
   def loadState(): AppState = {
     val loadAttempt: Try[AppState] = Try {
-      // 1. Пробуем прочитать файл
+      // 1. Try to read the file
       val jsonString = Files.readString(STATE_FILE_PATH)
       logger.trace("Read state file content (length: {}).", jsonString.length)
 
-      // 2. Проверяем, не пустой ли файл
+      // 2. Check if the file is empty
       if (jsonString.trim.isEmpty) {
         logger.warn(s"State file ${STATE_FILE_PATH.toAbsolutePath} is empty. Using initial state.")
-        throw new Exception("State file is empty")
+        throw new Exception("State file is empty") // This specific exception message is caught below.
       }
 
-      // 3. Пробуем десериализовать JSON
+      // 3. Try to deserialize JSON
       val loadedState = JsonUtil.deserialize[AppState](jsonString)
       logger.info("Application state loaded successfully from {}", STATE_FILE_PATH.toAbsolutePath)
-      loadedState // Возвращаем успешно загруженное состояние
+      loadedState // Return successfully loaded state
     }
 
     loadAttempt.recoverWith {
       case _: NoSuchFileException =>
         logger.warn(s"State file ${STATE_FILE_PATH.toAbsolutePath} not found. Using initial state.")
-        Success(AppState.initialState) // Возвращаем Success с начальным состоянием
+        Success(AppState.initialState) // Return Success with initial state
       case e: Exception if e.getMessage == "State file is empty" =>
-        // Мы сами бросили это исключение выше для пустого файла
-        Success(AppState.initialState) // Возвращаем Success с начальным состоянием
-      case NonFatal(e) => // Ловим все остальные не фатальные ошибки (ошибка чтения, ошибка парсинга JSON и т.д.)
+        // We threw this exception above for an empty file.
+        Success(AppState.initialState) // Return Success with initial state
+      case NonFatal(e) => // Catch all other non-fatal errors (read error, JSON parsing error, etc.)
         logger.error(s"Failed to load or parse state from ${STATE_FILE_PATH.toAbsolutePath}. Attempting to backup and use initial state.", e)
-        // Попытка бэкапа поврежденного файла
+        // Attempt to backup the corrupted file
         Try {
           val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
           val backupPath = Paths.get(s"${STATE_FILE_PATH.toString}.corrupted_$timestamp")
@@ -79,7 +78,7 @@ object StateRepository {
           case NonFatal(backupEx) =>
             logger.error(s"Failed to backup corrupted state file ${STATE_FILE_PATH.toAbsolutePath}", backupEx)
         }
-        Success(AppState.initialState) // При любой другой ошибке - возвращаем Success с начальным состоянием
-    }.get // Теперь .get вызывается на Success[AppState], что безопасно и корректно
+        Success(AppState.initialState) // For any other error - return Success with initial state
+    }.get // .get is now called on Success[AppState], which is safe and correct
   }
 }

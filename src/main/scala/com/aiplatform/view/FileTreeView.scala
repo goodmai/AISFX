@@ -3,11 +3,12 @@ package com.aiplatform.view
 
 import com.aiplatform.controller.MainController
 import com.aiplatform.controller.manager.FileManager
-import com.aiplatform.model.FileNode
+import com.aiplatform.model.{FileNode, FileSelectionState, FileTreeContext} // Added FileSelectionState, FileTreeContext
+import com.aiplatform.service.FileTreeService // Added FileTreeService
 
 import javafx.scene.control.{TreeItem => JFXTreeItem, CheckBoxTreeItem => JFXCheckBoxTreeItem}
 import javafx.scene.control.cell.CheckBoxTreeCell
-import javafx.scene.Node // Графический узел JavaFX
+import javafx.scene.Node // JavaFX graphic node
 import javafx.scene.layout.StackPane
 import javafx.scene.shape.SVGPath
 import javafx.scene.paint.Color
@@ -15,7 +16,7 @@ import javafx.scene.paint.Color
 import scalafx.Includes._
 import scalafx.application.Platform
 import scalafx.scene.control._
-import scalafx.scene.layout.{BorderPane, VBox} // VBox уже импортирован
+import scalafx.scene.layout.{BorderPane, VBox}
 import scalafx.scene.Parent
 import scalafx.stage.DirectoryChooser
 import org.slf4j.LoggerFactory
@@ -24,10 +25,14 @@ import scala.collection.mutable
 import scala.util.{Failure, Success}
 
 
-class FileTreeView(fileManager: FileManager, mainController: MainController) {
+class FileTreeView(
+                    fileManager: FileManager, // Retained for now, though FileTreeService might encapsulate it later
+                    mainController: MainController,
+                    fileTreeService: FileTreeService // Added FileTreeService
+                  ) {
   private val logger = LoggerFactory.getLogger(getClass)
 
-  private var currentRootDataNode: Option[FileNode] = None
+  private var currentRootDataNode: Option[FileNode] = None // Represents the data root of the currently displayed directory
 
   private object Icons {
     private def createIcon(svgContent: String, color: Color): Node = {
@@ -70,78 +75,78 @@ class FileTreeView(fileManager: FileManager, mainController: MainController) {
 
   private val treeView: TreeView[FileNode] = new TreeView(jfxTreeView)
 
-  // Кнопки теперь будут располагаться вертикально
-  private val openDirectoryButton = new Button("Открыть каталог...") {
+  // Buttons are now arranged vertically.
+  private val openDirectoryButton = new Button("Open Directory...") { // Translated
     onAction = _ => handleOpenDirectory()
     styleClass.add("file-tree-button")
-    maxWidth = Double.MaxValue // Чтобы кнопка растягивалась по ширине VBox
+    maxWidth = Double.MaxValue // To make the button stretch to the width of the VBox.
   }
 
-  private val refreshButton = new Button("Обновить") {
+  private val refreshButton = new Button("Refresh") { // Translated
     onAction = _ => currentRootDataNode.foreach(node => loadDirectory(node.file, isRefresh = true))
     styleClass.add("file-tree-button")
     disable = true
     maxWidth = Double.MaxValue
   }
 
-  private val clearSelectionButton = new Button("Снять выделение") {
-    onAction = _ => Option(jfxTreeView.getRoot()).foreach(clearTreeItemSelection)
+  private val clearSelectionButton = new Button("Clear Selection") { // Translated
+    onAction = _ => {
+      Option(jfxTreeView.getRoot()).foreach(clearTreeItemSelection)
+      // Also clear the context in AppState if user clears selection manually
+      mainController.clearFileTreeContextFromView()
+    }
     styleClass.add("file-tree-button")
     maxWidth = Double.MaxValue
   }
 
-  private val addContextButton = new Button("Добавить контекст") { // Текст немного сокращен
+  private val addContextButton = new Button("Add to Context") { // Translated
     onAction = _ => handleAddSelectedFilesToContext()
-    styleClass.add("file-tree-add-context-button") // Можно задать отдельный стиль, если нужно
-    tooltip = Tooltip("Добавить содержимое отмеченных файлов в поле ввода основного запроса.")
+    styleClass.add("file-tree-add-context-button")
+    tooltip = Tooltip("Add the content of selected files to the request context.") // Translated
     maxWidth = Double.MaxValue
   }
 
   private def handleOpenDirectory(): Unit = {
-    val directoryChooser = new DirectoryChooser { title = "Выберите корневой каталог для отображения" }
+    val directoryChooser = new DirectoryChooser { title = "Select Root Directory to Display" } // Translated
     mainController.getMainStage match {
       case Some(sfxStage) =>
         val selectedDir = Option(directoryChooser.showDialog(sfxStage.delegate))
         selectedDir.foreach(dir => loadDirectory(dir, isRefresh = false))
-      case None => logger.warn("Не удалось получить родительское окно для диалога выбора каталога (mainController.getMainStage вернул None).")
+      case None => logger.warn("Failed to get parent window for directory chooser dialog (mainController.getMainStage returned None).") // Translated
     }
   }
 
   private def loadDirectory(directory: File, isRefresh: Boolean): Unit = {
-    logger.info("Загрузка каталога в дерево: {}", directory.getAbsolutePath())
-    fileManager.scanDirectory(directory) match {
+    logger.info(s"Loading directory into tree: ${directory.getAbsolutePath}")
+    fileTreeService.scanDirectoryStructure(directory) match { // Uses fileTreeService
       case Success(scannedRootNode) =>
         currentRootDataNode = Some(scannedRootNode)
         Platform.runLater {
-          val rootTreeItem = createTreeItem(scannedRootNode)
+          val rootTreeItem = fileTreeService.createFxTreeItem(scannedRootNode) // Uses fileTreeService
           rootTreeItem.setExpanded(true)
+          // Ensure independent selection for children by default for better UX
+          // This can be set in FileTreeService or here. Let's assume service sets it if desirable.
+          // rootTreeItem.setIndependent(false) // Usually root is not independent if children control parent state.
+          // Iterating children to set them as independent if needed by design:
+          // rootTreeItem.getChildren.forEach(child => child.asInstanceOf[JFXCheckBoxTreeItem[FileNode]].setIndependent(true))
+
           jfxTreeView.setRoot(rootTreeItem)
           if (!isRefresh) {
-            // clearTreeItemSelection(rootTreeItem)
+            // Optional: clear previous selection state or context
+            // mainController.clearFileTreeContextFromView() // If new dir means new context
           }
           refreshButton.disable = false
-          logger.info("Дерево каталогов для '{}' успешно построено и отображено.", directory.getName())
+          logger.info(s"Directory tree for '${directory.getName}' successfully built and displayed.") // Translated
         }
       case Failure(e) =>
-        logger.error(s"Ошибка при сканировании каталога ${directory.getAbsolutePath()}", e)
+        logger.error(s"Error scanning directory ${directory.getAbsolutePath}", e)
         Platform.runLater(
-          DialogUtils.showError(s"Не удалось загрузить каталог '${directory.getName()}': ${e.getMessage()}", mainController.getMainStage)
+          DialogUtils.showError(s"Failed to load directory '${directory.getName}': ${e.getMessage()}", mainController.getMainStage) // Translated
         )
     }
   }
 
-  private def createTreeItem(dataNode: FileNode): JFXCheckBoxTreeItem[FileNode] = {
-    val item = new JFXCheckBoxTreeItem[FileNode](dataNode)
-    item.setIndependent(false)
-
-    if (dataNode.isDirectory) {
-      item.setExpanded(false)
-      dataNode.children
-        .sortBy(childNode => (!childNode.isDirectory, childNode.name.toLowerCase))
-        .foreach(childDataNode => item.getChildren().add(createTreeItem(childDataNode)))
-    }
-    item
-  }
+  // createTreeItem method removed, functionality moved to FileTreeService
 
   private def clearTreeItemSelection(treeItem: JFXTreeItem[FileNode]): Unit = {
     if (treeItem == null) return
@@ -158,66 +163,54 @@ class FileTreeView(fileManager: FileManager, mainController: MainController) {
   }
 
   private def handleAddSelectedFilesToContext(): Unit = {
-    val selectedFileNodes = mutable.ListBuffer[FileNode]()
-    Option(jfxTreeView.getRoot()).foreach(collectSelectedFileNodes(_, selectedFileNodes))
+    val selectedFileNodesJfx = Option(jfxTreeView.getRoot()) match {
+      case Some(root) => fileTreeService.collectSelectedFileNodesJfx(root) // Uses fileTreeService
+      case None       => List.empty[FileNode]
+    }
 
-    if (selectedFileNodes.isEmpty) {
+    if (selectedFileNodesJfx.isEmpty) {
       Platform.runLater(
-        DialogUtils.showInfo("Нет выбранных файлов для добавления в контекст.", mainController.getMainStage)
+        DialogUtils.showInfo("No files selected to add to context.", mainController.getMainStage) // Translated
       )
       return
     }
 
-    logger.info("Добавление контекста из {} выбранных элементов.", selectedFileNodes.size)
-    val contextBuilder = new StringBuilder()
-    contextBuilder.append("\n\n--- Начало Контекста из Выбранных Файлов ---\n")
+    logger.info(s"Processing ${selectedFileNodesJfx.size} selected items for context.")
 
-    selectedFileNodes.filter(_.isFile).foreach { fileNode =>
-      contextBuilder.append(s"\n### Файл: ${fileNode.path}\n")
-      fileManager.readFileContent(fileNode.file) match {
+    val selectionStates = selectedFileNodesJfx.filter(_.isFile).map { fileNode =>
+      fileTreeService.readFileContent(fileNode) match { // Uses fileTreeService
         case Success(content) =>
-          contextBuilder.append("```\n")
-          contextBuilder.append(content.trim())
-          contextBuilder.append("\n```\n")
+          FileSelectionState.Selected(fileNode.path, content)
         case Failure(e) =>
-          val errorMsg = s"[Не удалось прочитать содержимое файла ${fileNode.name}: ${e.getMessage()}]\n"
-          contextBuilder.append(errorMsg)
-          logger.error(s"Ошибка чтения файла ${fileNode.path} для контекста.", e)
+          val errorMsg = s"Failed to read content for ${fileNode.name}: ${e.getMessage}"
+          logger.error(s"Error reading file ${fileNode.path} for context.", e)
+          FileSelectionState.SelectionError(fileNode.path, errorMsg)
       }
     }
-    contextBuilder.append("\n--- Конец Контекста из Выбранных Файлов ---\n")
-    mainController.appendToInputArea(contextBuilder.toString())
+
+    val fileContext = FileTreeContext(selectionStates)
+    mainController.updateFileTreeContext(fileContext) // New call to MainController
+    // Old logic of appending to input area is removed.
   }
 
-  private def collectSelectedFileNodes(treeItem: JFXTreeItem[FileNode], acc: mutable.ListBuffer[FileNode]): Unit = {
-    if (treeItem == null || treeItem.getValue() == null) return
-
-    val fileNode = treeItem.getValue()
-    if (fileNode.isSelected) {
-      acc.append(fileNode)
-    }
-    val children = treeItem.getChildren()
-    for (i <- 0 until children.size()) {
-      collectSelectedFileNodes(children.get(i), acc)
-    }
-  }
+  // collectSelectedFileNodes method removed, functionality moved to FileTreeService
 
   /**
-   * Корневой узел этого UI компонента.
-   * Кнопки управления теперь располагаются вертикально над деревом.
+   * The root node of this UI component.
+   * Control buttons are now arranged vertically above the tree.
    */
   def viewNode: Parent = {
-    // ИСПРАВЛЕНО: Кнопки теперь в VBox
+    // Buttons are now in a VBox.
     val controlButtonsVBox = new VBox {
       children = Seq(openDirectoryButton, refreshButton, clearSelectionButton, addContextButton)
-      spacing = 5 // Отступ между кнопками
-      padding = scalafx.geometry.Insets(5, 5, 10, 5) // Отступы: сверху, справа, снизу, слева
-      alignment = scalafx.geometry.Pos.TopCenter // Выравнивание кнопок по центру VBox
+      spacing = 5 // Spacing between buttons
+      padding = scalafx.geometry.Insets(5, 5, 10, 5) // Padding: top, right, bottom, left
+      alignment = scalafx.geometry.Pos.TopCenter // Align buttons to the center of VBox
     }
 
     new BorderPane {
       styleClass.add("file-tree-view-pane")
-      top = controlButtonsVBox // Вертикальный блок кнопок сверху
+      top = controlButtonsVBox // Vertical button block at the top.
       center = treeView
     }
   }

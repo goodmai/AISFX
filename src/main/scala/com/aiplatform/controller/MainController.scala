@@ -68,12 +68,13 @@ class MainController(
   private val isRequestInProgress = new AtomicBoolean(false)
   private val isProgrammaticSelectionFlag = new AtomicBoolean(false)
   private var pendingImageData: Option[InlineData] = None
-  private var pendingFileContext: StringBuilder = new StringBuilder()
+  private var pendingFileContext: StringBuilder = new StringBuilder() // For text-based file context from drag-drop.
+  // Structured file context (FileTreeContext) is stored in AppState.fileContext.
 
   private val isSyncingUI = new AtomicBoolean(false)
   private val syncCounter = new AtomicLong(0)
 
-  // --- Публичные методы, доступные для View компонентов ---
+  // --- Public methods for View components ---
   def getMainStage: Option[Stage] = this.mainStage
 
   def appendToInputArea(text: String): Unit = {
@@ -82,8 +83,8 @@ class MainController(
     }
   }
 
-  def getIsProgrammaticSelection: Boolean = isProgrammaticSelectionFlag.get() // () добавлены
-  // --- Конец публичных методов ---
+  def getIsProgrammaticSelection: Boolean = isProgrammaticSelectionFlag.get()
+  // --- End of public methods ---
 
 
   initializeController()
@@ -128,9 +129,9 @@ class MainController(
     val responseNode = ResponseArea.create()
     val historyPanelNode = HistoryPanel.create(this)
 
-    // Assuming FileTreeView constructor is now parameterless as per its definition.
-    // If it needs ftManager or this (MainController), it must be injected differently or initialized post-construction.
-    val fileTreeViewComponent = new FileTreeView(this.fileManager.get, this) // <<< Исправлено здесь
+    // Assuming FileTreeView constructor is now parameterless as per its definition. (Note: It's not, it takes dependencies)
+    // If it needs ftManager or this (MainController), it must be injected.
+    val fileTreeViewComponent = new FileTreeView(this.fileManager.get, this, fileTreeService) // Pass FileTreeService
     this.fileTreeViewInstance = Some(fileTreeViewComponent)
     val fileTreeViewNode = fileTreeViewComponent.viewNode
 
@@ -187,7 +188,7 @@ class MainController(
         return
       }
 
-      logger.info(s"[$callId] >>> Starting UI synchronization on thread: ${Thread.currentThread().getName}...") // getName()
+      logger.info(s"[$callId] >>> Starting UI synchronization on thread: ${Thread.currentThread().getName}...")
       val state = currentAppState
       val currentCategory = activeCategoryName
       val activeTopicIdOpt = state.activeTopicId
@@ -197,7 +198,7 @@ class MainController(
       headerRef.foreach(_.setActiveButton(currentCategory))
       updateHistoryPanel(currentCategory, activeTopicIdOpt)
       updateResponseArea(activeTopicIdOpt, currentCategory)
-      updateFooterState(isRequestInProgress.get()) // get()
+      updateFooterState(isRequestInProgress.get())
 
       logger.info(s"[$callId] <<< UI state synchronization finished.")
     } catch {
@@ -231,15 +232,15 @@ class MainController(
     if (activeTopicIdOpt.isDefined && topicOpt.isDefined) {
       ResponseArea.displayTopicDialogs(dialogsToShow)
       if (dialogsToShow.isEmpty) {
-        ResponseArea.showStatus("Это новый топик. Введите ваш первый запрос или добавьте контекст.")
+        ResponseArea.showStatus("This is a new topic. Enter your first query or add context.")
       }
     } else {
       ResponseArea.clearDialog()
       val topicsInCurrentCategory = topicManager.getTopicsForCategory(currentCategory)
       if (topicsInCurrentCategory.isEmpty) {
-        ResponseArea.showError(s"В категории '$currentCategory' нет топиков. Начните новый (+) или выберите другую категорию.")
+        ResponseArea.showError(s"No topics in category '$currentCategory'. Start a new one (+) or choose another category.")
       } else {
-        ResponseArea.showStatus(s"Выберите топик из списка слева для категории '$currentCategory' или начните новый (+).")
+        ResponseArea.showStatus(s"Select a topic from the list on the left for category '$currentCategory' or start a new one (+).")
       }
     }
   }
@@ -251,9 +252,9 @@ class MainController(
 
   def handleHeaderAction(buttonName: String): Unit = {
     logger.info("Header action triggered for button: {}", buttonName)
-    if (isRequestInProgress.get()) { // get()
+    if (isRequestInProgress.get()) {
       logger.warn("Ignoring header action: request in progress.")
-      DialogUtils.showInfo("Пожалуйста, дождитесь завершения текущего запроса.", ownerWindow = mainStage)
+      DialogUtils.showInfo("Please wait for the current request to complete.", ownerWindow = mainStage) // Translated
       return
     }
     if (buttonName == "Settings") {
@@ -287,17 +288,17 @@ class MainController(
   private def processUserInput(inputText: String): Unit = {
     val trimmedText = inputText.trim
     logger.debug("Processing user input: '{}'", trimmedText)
-    if (isRequestInProgress.get()) { // get()
+    if (isRequestInProgress.get()) {
       logger.warn("Attempted to send request while another is in progress.")
-      DialogUtils.showError("Пожалуйста, дождитесь завершения предыдущего запроса.", ownerWindow = mainStage)
+      DialogUtils.showError("Please wait for the previous request to complete.", ownerWindow = mainStage) // Translated
       return
     }
     val imageDataToSend = pendingImageData
     pendingImageData = None
-    // No need to clear file context here, it will be used for the request
+    // File contexts (both types) are cleared in submitRequestAsync after the request is formed.
     if (trimmedText.isEmpty && imageDataToSend.isEmpty) {
       logger.warn("Attempted to send empty input (no text and no pending image).")
-      DialogUtils.showError("Запрос не может быть пустым (введите текст, прикрепите файлы или вставьте изображение).", ownerWindow = mainStage)
+      DialogUtils.showError("Request cannot be empty (enter text, attach files, or paste an image).", ownerWindow = mainStage) // Translated
       return
     }
     validateInputLength(trimmedText) match {
@@ -305,10 +306,10 @@ class MainController(
         logger.warn("Input validation failed: {}", error)
         DialogUtils.showError(error, ownerWindow = mainStage)
       case None =>
-        getApiKey() match { // () добавлены
+        getApiKey() match {
           case None =>
             logger.error("API Key missing.")
-            DialogUtils.showError("API ключ не найден. Пожалуйста, добавьте его в настройках.", ownerWindow = mainStage)
+            DialogUtils.showError("API key not found. Please add it in settings.", ownerWindow = mainStage) // Translated
           case Some(apiKey) =>
             val categoryForRequest = activeCategoryName
             val categoryHint = if (categoryForRequest == "Global") None else Some(categoryForRequest)
@@ -320,12 +321,13 @@ class MainController(
   def startNewTopic(): Unit = {
     val category = activeCategoryName
     logger.info(s"User requested to start a new topic in category '$category'.")
-    if (isRequestInProgress.get()) { // get()
+    if (isRequestInProgress.get()) {
       logger.warn("Ignoring 'New Topic' action: request in progress.")
       return
     }
     pendingImageData = None
-    clearFileContext()
+    clearFileContext() // Clears the StringBuilder based pendingFileContext
+    clearStructuredFileContext() // Clears the AppState.fileContext
     topicManager.createNewTopic(category) match {
       case Success(newTopic) =>
         logger.info(s"New topic '${newTopic.id}' created successfully. Setting active.")
@@ -333,12 +335,12 @@ class MainController(
         Platform.runLater(footerRef.foreach(_.clearInput()))
       case Failure(e) =>
         logger.error(s"Failed to create new topic in category '$category'.", e)
-        DialogUtils.showError(s"Не удалось создать новый топик: ${e.getMessage}", ownerWindow = mainStage)
+        DialogUtils.showError(s"Failed to create new topic: ${e.getMessage}", ownerWindow = mainStage) // Translated
     }
   }
 
   def setActiveTopic(topicIdOpt: Option[String]): Unit = {
-    if (isProgrammaticSelectionFlag.get() && currentAppState.activeTopicId == topicIdOpt) { // get()
+    if (isProgrammaticSelectionFlag.get() && currentAppState.activeTopicId == topicIdOpt) {
       logger.trace(s"Skipping setActiveTopic for ${topicIdOpt.getOrElse("None")} due to programmatic flag and no actual change.")
       return
     }
@@ -349,7 +351,10 @@ class MainController(
       return
     }
     logger.info(s"Attempting to set active topic from ${prevActiveTopicId.getOrElse("None")} to ${topicIdOpt.getOrElse("None")}")
-    if (prevActiveTopicId != topicIdOpt) pendingImageData = None
+    if (prevActiveTopicId != topicIdOpt) {
+      pendingImageData = None
+      clearStructuredFileContext() // Clear structured context if topic actually changes
+    }
 
     val categoryBeforeChange = activeCategoryName
 
@@ -385,17 +390,21 @@ class MainController(
         }
       case Failure(e) =>
         logger.error(s"Failed to set active topic to ${topicIdOpt.getOrElse("None")}.", e)
-        DialogUtils.showError(s"Ошибка при выборе топика: ${e.getMessage}", ownerWindow = mainStage)
+        DialogUtils.showError(s"Error selecting topic: ${e.getMessage}", ownerWindow = mainStage) // Translated
     }
   }
 
   def deleteTopic(topicId: String): Unit = {
     logger.debug(s"Delete requested for topic ID: $topicId")
-    if (isRequestInProgress.get()) { // get()
+    if (isRequestInProgress.get()) {
       logger.warn("Ignoring 'Delete Topic' action: request in progress.")
       return
     }
-    if (currentAppState.activeTopicId.contains(topicId)) pendingImageData = None
+    if (currentAppState.activeTopicId.contains(topicId)) {
+      pendingImageData = None
+      // If the topic being deleted is active, its structured context should be cleared.
+      clearStructuredFileContext()
+    }
 
     topicManager.findTopicById(topicId) match {
       case Some(topicToDelete) =>
@@ -423,20 +432,20 @@ class MainController(
                 }
               case Failure(e) =>
                 logger.error(s"Failed to delete topic '$topicId'.", e)
-                DialogUtils.showError(s"Ошибка удаления топика: ${e.getMessage}", ownerWindow = mainStage)
+                DialogUtils.showError(s"Error deleting topic: ${e.getMessage}", ownerWindow = mainStage) // Translated
             }
           case _ => logger.debug(s"Deletion cancelled by user for topic $topicId.")
         }
       case None =>
         logger.warn(s"Attempted to delete a non-existent topic with ID: $topicId")
-        DialogUtils.showError(s"Невозможно удалить: топик с ID $topicId не найден.", ownerWindow = mainStage)
+        DialogUtils.showError(s"Cannot delete: topic with ID $topicId not found.", ownerWindow = mainStage) // Translated
     }
   }
 
   private def handleFileDropped(file: File): Unit = {
-    logger.info(s"Handling dropped file: ${file.getName}") // getName()
-    if (isRequestInProgress.get()) { // get()
-      DialogUtils.showError("Невозможно обработать файл во время выполнения запроса.", ownerWindow = mainStage)
+    logger.info(s"Handling dropped file: ${file.getName}")
+    if (isRequestInProgress.get()) {
+      DialogUtils.showError("Cannot process file while a request is in progress.", ownerWindow = mainStage) // Translated
       return
     }
 
@@ -457,35 +466,35 @@ class MainController(
           }
 
           // Check if file is too large
-          val maxFileSizeKB = 500
+          val maxFileSizeKB = 500 // Max file size for text-based context
           if (fileSizeKB > maxFileSizeKB) {
-            val warningMsg = s"Файл ${file.getName} ($fileSizeStr) слишком большой. Максимальный размер файла для контекста: $maxFileSizeKB KB."
+            val warningMsg = s"File ${file.getName} ($fileSizeStr) is too large. Max file size for context: $maxFileSizeKB KB."
             logger.warn(warningMsg)
-            DialogUtils.showWarning(warningMsg, ownerWindow = mainStage)
+            DialogUtils.showWarning(warningMsg, ownerWindow = mainStage) // String is already mostly English
           } else {
             // Show confirmation dialog with preview
             val confirmationMsg =
-              s"""Добавить файл "${file.getName}" ($fileSizeStr) в контекст для AI модели?
+              s"""Add file "${file.getName}" ($fileSizeStr) to context for the AI model?
                  |
-                 |Предпросмотр содержимого:
+                 |Content preview:
                  |```
                  |$contentPreview
                  |```
                  |
-                 |Содержимое файла будет отправлено в AI модель с вашим следующим запросом.""".stripMargin
+                 |The file content will be sent to the AI model with your next request.""".stripMargin // Translated
 
             DialogUtils.showConfirmation(confirmationMsg, ownerWindow = mainStage).foreach {
               case ButtonType.OK =>
                 // User confirmed, add file content to pending context with proper escaping
                 val escapedContent = escapeFileContent(content)
-                appendToFileContext(file.getName, escapedContent)
+                appendToFileContext(file.getName, escapedContent) // Appends to the StringBuilder pendingFileContext
 
                 // Also append formatted text to UI footer
                 manager.readFileAndAppendToFooter(file)
 
                 // Show feedback to user
                 Platform.runLater {
-                  DialogUtils.showInfo(s"Файл ${file.getName} добавлен в контекст. Содержимое будет отправлено с вашим следующим запросом.", ownerWindow = mainStage)
+                  DialogUtils.showInfo(s"File ${file.getName} added to context. Content will be sent with your next request.", ownerWindow = mainStage) // Translated
                 }
               case _ =>
                 logger.debug(s"User declined to add file ${file.getName} to context")
@@ -493,15 +502,15 @@ class MainController(
           }
         case Failure(e) =>
           logger.error(s"Failed to read file ${file.getName} for context: ${e.getMessage}", e)
-          DialogUtils.showError(s"Не удалось прочитать файл ${file.getName} для контекста: ${e.getMessage}", ownerWindow = mainStage)
+          DialogUtils.showError(s"Failed to read file ${file.getName} for context: ${e.getMessage}", ownerWindow = mainStage) // Translated
       }
     }
   }
 
   private def handleDirectoryDropped(dir: File): Unit = {
-    logger.info(s"Handling dropped directory: ${dir.getName}") // getName()
-    if (isRequestInProgress.get()) { // get()
-      DialogUtils.showError("Невозможно обработать папку во время выполнения запроса.", ownerWindow = mainStage)
+    logger.info(s"Handling dropped directory: ${dir.getName}")
+    if (isRequestInProgress.get()) {
+      DialogUtils.showError("Cannot process folder while a request is in progress.", ownerWindow = mainStage) // Translated
       return
     }
 
@@ -512,8 +521,8 @@ class MainController(
 
   private def handleImagePasted(image: JFXImage): Unit = {
     logger.info(s"Handling pasted image (size: ${image.getWidth}x${image.getHeight}).")
-    if (isRequestInProgress.get()) { // get()
-      DialogUtils.showError("Невозможно обработать изображение во время выполнения другого запроса.", ownerWindow = mainStage)
+    if (isRequestInProgress.get()) {
+      DialogUtils.showError("Cannot process image while another request is in progress.", ownerWindow = mainStage) // Translated
       return
     }
     Try {
@@ -524,19 +533,54 @@ class MainController(
         ImageIO.write(SwingFXUtils.fromFXImage(image, null), format, baos)
         baos.toByteArray
       }
-      val base64Data = java.util.Base64.getEncoder.encodeToString(buffer) // getEncoder()
+      val base64Data = java.util.Base64.getEncoder.encodeToString(buffer)
       pendingImageData = Some(InlineData(mimeType = mimeType, data = base64Data))
       logger.info(s"Image encoded to Base64 ($mimeType, data length: ${base64Data.length}). Ready for next request.")
       Platform.runLater {
-        val placeholder = s"\n[Изображение (${image.getWidth}x${image.getHeight}) готово к отправке с текстом]\n"
+        val placeholder = s"\n[Image (${image.getWidth}x${image.getHeight}) is ready to be sent with text]\n" // Translated
         appendToInputArea(placeholder)
       }
     }.recover {
       case NonFatal(e) =>
         logger.error("Failed to process pasted image.", e)
-        DialogUtils.showError(s"Не удалось обработать вставленное изображение: ${e.getMessage}", ownerWindow = mainStage)
+        DialogUtils.showError(s"Failed to process pasted image: ${e.getMessage}", ownerWindow = mainStage) // Translated
         pendingImageData = None
-        clearFileContext()
+        clearFileContext() // Clears StringBuilder context
+        clearStructuredFileContext() // Clears AppState context
+    }
+  }
+
+  def updateFileTreeContext(newContext: FileTreeContext): Unit = {
+    logger.info(s"Updating FileTreeContext in AppState with ${newContext.selectedFiles.length} file states.")
+    val updateResult = stateManager.updateState { currentState =>
+      currentState.copy(fileContext = Some(newContext))
+    }
+    updateResult match {
+      case Success(_) =>
+        logger.info("Successfully updated AppState with new FileTreeContext.")
+        Platform.runLater {
+          DialogUtils.showInfo(s"${newContext.selectedFiles.length} file(s) added to request context.", ownerWindow = mainStage) // Translated
+        }
+      case Failure(e) =>
+        logger.error("Failed to update AppState with new FileTreeContext.", e)
+        Platform.runLater {
+          DialogUtils.showError(s"Failed to update file context: ${e.getMessage}", ownerWindow = mainStage) // Translated
+        }
+    }
+  }
+
+  // Called by FileTreeView (or other UI element) when user wants to clear all selected files from context
+  def clearFileTreeContextFromView(): Unit = {
+    logger.info("User requested to clear FileTreeContext via UI command.")
+    clearStructuredFileContext() // Clears AppState.fileContext
+
+    // Optionally, inform FileTreeView to reset its visual state if it doesn't observe AppState
+    fileTreeViewInstance.foreach { ftv =>
+      // ftv.resetSelectionVisuals() // Placeholder for a method if needed for FileTreeView to visually update
+      logger.debug("FileTreeContext cleared from AppState. FileTreeView might need to update its visuals if not observing state.")
+    }
+    Platform.runLater {
+      DialogUtils.showInfo("Selected file context has been cleared.", ownerWindow = mainStage) // Translated
     }
   }
 
@@ -548,7 +592,7 @@ class MainController(
                             ): Unit = {
     if (!isRequestInProgress.compareAndSet(false, true)) {
       logger.warn("executeRequest called while another request is already in progress. Aborting.")
-      DialogUtils.showError("Предыдущий запрос еще выполняется.", ownerWindow = mainStage)
+      DialogUtils.showError("Previous request is still in progress.", ownerWindow = mainStage) // Translated
       return
     }
     var turnIdForUI: String = ""
@@ -564,11 +608,12 @@ class MainController(
         footerRef.foreach(_.clearInput())
         ResponseArea.showLoadingIndicatorForRequest(turnIdForUI)
         logger.debug(s"UI prepared for request. Turn ID: $turnIdForUI. Image included: ${imageDataOpt.isDefined}")
-        // Get file context if any is available
-        val fileContextOpt = if (pendingFileContext.nonEmpty) Some(pendingFileContext.toString()) else None
-        submitRequestAsync(originalRequestText, categoryHint, apiKey, imageDataOpt, fileContextOpt, turnIdForUI)
+        // Get text-based file context (from drag-drop) if any is available
+        val textFileContextOpt = if (pendingFileContext.nonEmpty) Some(pendingFileContext.toString()) else None
+        // Structured FileTreeContext will be retrieved from AppState in submitRequestAsync
+        submitRequestAsync(originalRequestText, categoryHint, apiKey, imageDataOpt, textFileContextOpt, turnIdForUI)
       } else {
-        val errorMsg = s"Внутренняя ошибка UI при создании хода запроса (ID: $turnIdForUI)."
+        val errorMsg = s"Internal UI error creating request turn (ID: $turnIdForUI)." // Translated
         logger.error(errorMsg)
         DialogUtils.showError(errorMsg, ownerWindow = mainStage)
         isRequestInProgress.set(false)
@@ -582,22 +627,32 @@ class MainController(
                                   categoryHint: Option[String],
                                   apiKey: String,
                                   imageDataOpt: Option[InlineData],
+                                  // fileContextOpt from pendingFileContext (drag-drop) is passed directly
                                   fileContextOpt: Option[String],
                                   uiTurnId: String
                                 ): Unit = {
+    // Retrieve the structured file context from AppState
+    val structuredFileContextOpt = currentAppState.fileContext
+
     logger.info(
-      s"Submitting request via RequestExecutionManager. UITurnID: $uiTurnId, CategoryHint: $categoryHint, Image: ${imageDataOpt.isDefined}, FileContext: ${fileContextOpt.isDefined}"
+      s"Submitting request. UITurnID: $uiTurnId, CategoryHint: $categoryHint, Image: ${imageDataOpt.isDefined}, TextFileContext: ${fileContextOpt.isDefined}, StructuredFileContext: ${structuredFileContextOpt.isDefined}"
     )
+
+    // RequestExecutionManager.submitRequest will need to be updated to accept FileTreeContext
+    // For now, this will likely cause a compile error until that signature is changed.
     val resultFuture: Future[(String, Dialog)] = requestExecutionManager.submitRequest(
       originalRequestText,
       categoryHint,
       apiKey,
       imageDataOpt,
-      fileContextOpt
+      fileContextOpt, // Existing text-based context from drag-drop
+      structuredFileContextOpt // New structured context from FileTreeView
     )
 
-    // Clear file context after submitting the request
-    clearFileContext()
+    // Clear both types of file contexts after submitting the request
+    clearFileContext() // Clears the StringBuilder based pendingFileContext
+    clearStructuredFileContext() // Clears the AppState.fileContext
+
     resultFuture.onComplete { resultTry =>
       Platform.runLater {
         isRequestInProgress.set(false)
@@ -624,12 +679,12 @@ class MainController(
   }
 
   private def handleFailedAiResponse(exception: Throwable, uiTurnId: String): Unit = {
-    val message = Option(exception.getMessage).getOrElse("Неизвестная ошибка AI сервиса")
+    val message = Option(exception.getMessage).getOrElse("Unknown AI service error") // Translated
     logger.error(s"Handling failed AI response for UI turn ID '$uiTurnId': $message", exception)
     val displayMessage = if (message.contains("429") && message.toLowerCase.contains("quota")) {
-      "Достигнут лимит запросов к AI (ошибка 429). Пожалуйста, проверьте ваши квоты или попробуйте позже."
+      "AI request limit reached (error 429). Please check your quotas or try again later." // Translated
     } else {
-      s"Ошибка от AI сервиса: $message"
+      s"Error from AI service: $message" // Translated
     }
     ResponseArea.showErrorForRequest(uiTurnId, displayMessage)
   }
@@ -638,7 +693,7 @@ class MainController(
     mainStage.foreach { owner =>
       logger.debug("Showing settings window...")
       val state = currentAppState
-      val currentKey = getApiKey().getOrElse("") // () добавлены
+      val currentKey = getApiKey().getOrElse("")
       val settings = CurrentSettings(
         apiKey = currentKey,
         model = state.globalAiModel,
@@ -659,7 +714,7 @@ class MainController(
 
   def updateApiKey(newApiKey: String): Unit = {
     val trimmedKey = newApiKey.trim
-    val currentStoredKey = getApiKey() // () добавлены
+    val currentStoredKey = getApiKey()
     if (currentStoredKey.getOrElse("") == trimmedKey) {
       logger.debug("API Key submitted is the same as stored. No update performed.")
       return
@@ -671,9 +726,9 @@ class MainController(
     saveOrDeleteAction match {
       case Success(_) =>
         logger.info(s"API Key ${if (trimmedKey.isEmpty) "deleted" else "saved"} successfully.")
-        val processingChainFuture: Future[Unit] = fetchModelsAndUpdateState().map { _ => // () добавлены
+        val processingChainFuture: Future[Unit] = fetchModelsAndUpdateState().map { _ =>
           logger.info("Models fetched/cleared and AppState updated after API key change.")
-          updateAiServiceWithCurrentModel() // () добавлены
+          updateAiServiceWithCurrentModel()
         }
         processingChainFuture.onComplete {
           case Success(_) =>
@@ -685,7 +740,7 @@ class MainController(
         }
       case Failure(e) =>
         logger.error("Failed to save or delete API key in CredentialsService.", e)
-        DialogUtils.showError(s"Не удалось ${if (trimmedKey.isEmpty) "удалить" else "сохранить"} API ключ: ${e.getMessage}", ownerWindow = mainStage)
+        DialogUtils.showError(s"Failed to ${if (trimmedKey.isEmpty) "delete" else "save"} API key: ${e.getMessage}", ownerWindow = mainStage) // Translated
     }
   }
 
@@ -693,7 +748,7 @@ class MainController(
   def updateGlobalAIModel(newModelName: String): Try[Unit] = {
     val trimmedModelName = newModelName.trim
     if (trimmedModelName.isEmpty) {
-      val msg = "Имя глобальной модели не может быть пустым."
+      val msg = "Global model name cannot be empty." // Translated
       logger.error(msg)
       return Failure(new IllegalArgumentException(msg))
     }
@@ -706,7 +761,7 @@ class MainController(
     // Check if model exists in available models before attempting the update
     if (!currentState.availableModels.exists(_.name == trimmedModelName)) {
       val availableNames = currentState.availableModels.map(m => s"'${m.name}'").mkString(", ")
-      val errorMsg = s"Модель '$trimmedModelName' не найдена среди доступных: [$availableNames]."
+      val errorMsg = s"Model '$trimmedModelName' not found among available models: [$availableNames]." // Translated
       logger.error(s"Cannot set global model: $errorMsg")
       return Failure(new IllegalArgumentException(errorMsg))
     }
@@ -748,10 +803,10 @@ class MainController(
   def deleteCustomPreset(presetName: String): Try[Unit] = presetManager.deleteCustomPreset(presetName)
   def updateButtonMappings(newMappings: Map[String, String]): Try[Unit] = presetManager.updateButtonMappings(newMappings)
 
-  private def getApiKey(): Option[String] = CredentialsService.loadApiKey() // () добавлены
-  private def currentAppState: AppState = stateManager.getState // () добавлены
+  private def getApiKey(): Option[String] = CredentialsService.loadApiKey()
+  private def currentAppState: AppState = stateManager.getState
 
-  // Helper to get category from header or default, used as fallback
+  // Helper to get category from header or default, used as fallback.
   private def activeCategoryNameFromHeaderFallback(): String = {
     // Uses the new public method in Header.scala
     headerRef.map(_.getCurrentActiveButtonName)
@@ -768,8 +823,8 @@ class MainController(
       .getOrElse(activeCategoryNameFromHeaderFallback()) // Fallback to header's state or default
   }
 
-  private def fetchModelsAndUpdateState(): Future[Unit] = { // () добавлены
-    getApiKey() match { // () добавлены
+  private def fetchModelsAndUpdateState(): Future[Unit] = {
+    getApiKey() match {
       case Some(apiKey) if apiKey.nonEmpty =>
         logger.info("Attempting to fetch available AI models...")
         modelFetchingService.fetchAvailableModels(apiKey).transformWith {
@@ -807,15 +862,15 @@ class MainController(
     }
   }
 
-  // Helper methods for file context management
+  // Helper methods for text-based file context management (drag-drop)
   private def appendToFileContext(fileName: String, content: String): Unit = {
-    // Format file content with clear structure and proper line endings
+    // Format file content with clear structure and proper line endings for the StringBuilder context
     val formattedContent = s"""
 File: ${sanitizeFileName(fileName)}
 $content
 """
-       pendingFileContext.append(formattedContent)
-    logger.debug(s"Added content from $fileName to file context. Total context size: ${pendingFileContext.length}")
+    pendingFileContext.append(formattedContent)
+    logger.debug(s"Added content from $fileName to text-based file context. Total context size: ${pendingFileContext.length}")
 
     // Log context for debugging
     if (logger.isDebugEnabled) {
@@ -824,36 +879,61 @@ $content
       } else {
         pendingFileContext.toString
       }
-      logger.debug(s"Current file context:\n$contextPreview")
+      logger.debug(s"Current text-based file context:\n$contextPreview")
   }
 }
 
 /**
- * Sanitizes filename to prevent possible injection or formatting issues
+ * Sanitizes filename to prevent possible injection or formatting issues in text-based context.
  */
 private def sanitizeFileName(fileName: String): String = {
-  // Remove potential problematic characters
+  // Remove potential problematic characters like newlines, tabs, backticks
   fileName.replaceAll("[\\n\\r\\t`]", "")
 }
 
 /**
- * Escapes special characters in file content
- * to prevent issues with JSON formatting or markdown interpretation
+ * Escapes special characters in file content for text-based context.
+ * This helps prevent issues with JSON formatting or markdown interpretation if context is embedded.
  */
 private def escapeFileContent(content: String): String = {
-  // Replace backslashes with double backslashes to preserve them in JSON
-  // Replace backticks to prevent breaking markdown code blocks
+  // Basic escaping for common problematic characters in text formats.
+  // Example: replace backslashes to avoid issues if this content is embedded in JSON string.
+  // Replace backticks if content is displayed in Markdown without proper fencing.
   content
-    .replace("\\", "\\\\")
-    .replace("\b", "\\b")
-    .replace("\f", "\\f")
-    .replace("\r", "\\r")
+    .replace("\\", "\\\\") // Escape backslashes
+    .replace("`", "'")   // Replace backticks with single quotes as a simple strategy
+  // Further escaping might be needed depending on how this text context is used.
 }
 
+// Clears the StringBuilder-based text file context
 private def clearFileContext(): Unit = {
   if (pendingFileContext.nonEmpty) {
-    logger.debug(s"Clearing file context (size was: ${pendingFileContext.length})")
+    logger.debug(s"Clearing StringBuilder (text-based) file context (size was: ${pendingFileContext.length})")
     pendingFileContext.clear()
+  }
+}
+
+// Clears the structured FileTreeContext from AppState
+private def clearStructuredFileContext(): Unit = {
+  logger.info("Attempting to clear structured FileTreeContext (from FileTreeView) in AppState.")
+  if (currentAppState.fileContext.isDefined) {
+    val updateResult = stateManager.updateState { currentState =>
+      // Only update if it's actually defined, to avoid unnecessary state changes/saves
+      if (currentState.fileContext.isDefined) {
+        currentState.copy(fileContext = None)
+      } else {
+        currentState // No change needed if already None (should not happen due to outer check, but safe)
+      }
+    }
+    updateResult match {
+      case Success(_) =>
+        logger.info("Successfully cleared structured FileTreeContext in AppState (or it was already None).")
+      case Failure(e) =>
+        logger.error("Failed to clear structured FileTreeContext in AppState.", e)
+        // User notification might be excessive here if it's an internal clear operation (e.g., after request).
+    }
+  } else {
+    logger.debug("Structured FileTreeContext is already None in AppState. No update needed.")
   }
 }
 
@@ -938,9 +1018,9 @@ private def updateAiServiceWithCurrentModel(): Unit = {
 }
 
 private def validateInputLength(text: String): Option[String] = {
-  val maxLength = 30000
+  val maxLength = 30000 // Max length for user input text
   if (text.length > maxLength) {
-    Some(f"Запрос слишком длинный (${text.length}%,d / $maxLength%,d символов). Пожалуйста, сократите его.")
+    Some(f"Request is too long (${text.length}%,d / $maxLength%,d characters). Please shorten it.") // Translated
   } else {
     None
   }
