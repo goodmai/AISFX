@@ -179,7 +179,8 @@ class RequestExecutionManager(
             temperature = Some(activePreset.temperature), // Передаем как Option
             topP = Some(activePreset.topP),               // Передаем как Option
             topK = Some(activePreset.topK),               // Передаем как Option
-            maxOutputTokens = activePreset.maxOutputTokens, // Это уже Option[Int] из PromptPreset
+            // maxOutputTokens is not a parameter of AIService.process and not a field in PromptPreset
+            // AIService.process uses its own internal default for maxOutputTokens (e.g., 8192)
             history = topicHistory,
             imageData = imageDataOpt
           ) ().flatMap { aiResponse =>

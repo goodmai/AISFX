@@ -278,7 +278,7 @@ class AIService(implicit classicSystem: ActorSystem) {
     val trimmedModel = newModel.trim
     if (trimmedModel.isEmpty) {
       logger.warn("Attempted to update AI model to an empty string. Keeping current model '{}'.", currentModelRef.get())
-      currentModelRef.get()
+      currentModelRef.get() // Return current model if new one is empty
     } else {
       val previousModel = currentModelRef.getAndSet(trimmedModel)
       if (trimmedModel != previousModel) {
@@ -286,9 +286,12 @@ class AIService(implicit classicSystem: ActorSystem) {
       } else {
         logger.trace("AI model update requested, but new model name is the same as current ('{}').", previousModel)
       }
-      previousModel
+      previousModel // Return previous model
     }
   }
+
+  /** Возвращает текущее имя модели, используемой сервисом. */
+  def getCurrentModel: String = currentModelRef.get()
 
   def shutdown(): Future[Unit] = {
     logger.info("Shutting down AIService HTTP backend...")

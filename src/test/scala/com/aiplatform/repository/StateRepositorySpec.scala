@@ -8,62 +8,77 @@ import org.scalatest.matchers.should.Matchers
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.UUID
-
+import org.scalatest.BeforeAndAfterEach // Added for more granular cleanup if needed alongside withFixture
 
 class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll {
-  // --- --------------------------------------------- ---
 
-  // --- ИЗМЕНЕНИЕ: Используем предполагаемый путь по умолчанию ---
-  // Тест теперь ЗАВИСИТ от того, что StateRepository использует именно этот путь
-  private val stateFilePath: Path = Paths.get("app_state.json")
-  // --- ---------------------------------------------------- ---
+  private val stateFilePath: Path = Paths.get(StateRepository.STATE_FILE_NAME) // Use constant from StateRepository
 
-  // --- ИЗМЕНЕНИЕ: Удален код для подмены пути через рефлексию ---
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    // Initial cleanup in case of leftover files from a previous failed run
+    Files.deleteIfExists(stateFilePath)
+    // Clean up any potential old backup files from the test directory
+    cleanupBackupFiles(Paths.get(".")) // Assuming tests run in project root or a specific test dir
+  }
 
-  // Используем afterAll из BeforeAndAfterAll для очистки после ВСЕХ тестов
   override def afterAll(): Unit = {
-    try {
-      Files.deleteIfExists(stateFilePath) // Удаляем файл состояния по умолчанию
-      println(s"Deleted default state file used by test: $stateFilePath")
-    } catch {
-      case e: Exception => println(s"Error cleaning up default state file: ${e.getMessage}")
-    }
-    super.afterAll() // Вызываем afterAll суперкласса
+    Files.deleteIfExists(stateFilePath)
+    cleanupBackupFiles(Paths.get("."))
+    super.afterAll()
   }
 
-  // Используем withFixture для очистки перед/после КАЖДОГО теста
+  // withFixture handles cleanup for each test, ensuring stateFilePath is deleted.
   override def withFixture(test: NoArgTest) = {
-    println(s"Cleaning up default state file before test: ${test.name}")
-    Files.deleteIfExists(stateFilePath) // Очистка перед каждым тестом
-    try super.withFixture(test) // Запускаем тест
+    Files.deleteIfExists(stateFilePath) // Ensure clean state before test
+    try super.withFixture(test)
     finally {
-      println(s"Cleaning up default state file after test: ${test.name}")
-      Files.deleteIfExists(stateFilePath) // Очистка после каждого теста
+      Files.deleteIfExists(stateFilePath) // Clean up after test
+    }
+  }
+  
+  private def cleanupBackupFiles(directory: Path): Unit = {
+    try {
+      val directoryStream = Files.newDirectoryStream(directory, s"${stateFilePath.getFileName.toString}.corrupted_*")
+      try {
+        directoryStream.forEach(Files.deleteIfExists)
+      } finally {
+        directoryStream.close()
+      }
+    } catch {
+      case e: Exception => // Ignore errors during cleanup of backups, they might not exist
     }
   }
 
-  "StateRepository" should "save and load AppState correctly" in {
-    // 1. Создаем сложное состояние
-    val model1 = ModelInfo("model-1", "Model One")
-    val model2 = ModelInfo("model-2", "Model Two")
-    val presetD1 = PromptPreset("Preset D1", "D1: {{INPUT}}", isDefault = true)
-    val presetC1 = PromptPreset("Preset C1", "C1: {{INPUT}}")
 
-    val time1 = Instant.parse("2024-01-10T10:00:00Z")
-    val time2 = Instant.parse("2024-01-10T10:00:30Z")
-    val time3 = Instant.parse("2024-01-10T10:00:50Z")
-    val time4 = Instant.parse("2024-01-10T10:01:00Z")
-    val time5 = Instant.parse("2024-01-10T10:01:10Z")
+  behavior of "StateRepository.saveState and StateRepository.loadState"
 
-    val dialog1 = Dialog("T1", "Req1", "Resp1", time2, "model-1")
-    val dialog2 = Dialog("T1", "Req2", "Resp2", time4, "model-1")
-    val dialog3 = Dialog("T2", "Req3", "Resp3", time5, "model-2")
+  it should "correctly save and then load a valid AppState" in {
+    // Arrange
+    val model1 = ModelInfo("model-1", "Model One Display")
+    val model2 = ModelInfo("model-2", "Model Two Display")
+    val presetD1 = PromptPreset("Default Preset 1", "Prompt for D1: {{INPUT}}", isDefault = true, temperature = 0.7, topP = 0.9, topK = Some(40), maxOutputTokens = Some(256))
+    val presetC1 = PromptPreset("Custom Preset 1", "Prompt for C1: {{INPUT}}", isDefault = false, modelOverride = Some("model-1"))
 
-    val topic1 = Topic(UUID.randomUUID().toString, "Topic One", List(dialog1, dialog2), time1, time4, "Research")
-    val topic2 = Topic(UUID.randomUUID().toString, "Topic Two", List(dialog3), time3, time5, "Code")
-    val topic3 = Topic(UUID.randomUUID().toString, "Topic Three", List(), time5, time5, "Global")
+    val time1 = Instant.now().minusSeconds(300)
+    val time2 = time1.plusSeconds(30)
+    val time3 = time1.plusSeconds(60)
+    val time4 = time1.plusSeconds(90)
+    val time5 = time1.plusSeconds(120)
 
-    val initialState = AppState(
+    val dialog1 = Dialog("Dialog1", "Request 1", "Response 1", time2, "model-1")
+    val dialog2 = Dialog("Dialog2", "Request 2", "Response 2", time4, "model-1")
+    val dialog3 = Dialog("Dialog3", "Request 3", "Response 3", time5, "model-2")
+
+    val topic1Id = UUID.randomUUID().toString
+    val topic2Id = UUID.randomUUID().toString
+    val topic3Id = UUID.randomUUID().toString
+
+    val topic1 = Topic(topic1Id, "Research Topic", List(dialog1, dialog2), time1, time4, "Research")
+    val topic2 = Topic(topic2Id, "Coding Topic", List(dialog3), time3, time5, "Code")
+    val topic3 = Topic(topic3Id, "General Topic", List(), time5, time5, "Global")
+
+    val appStateToSave = AppState(
       topics = List(topic1, topic2, topic3),
       activeTopicId = Some(topic2.id),
       lastActiveTopicPerCategory = Map("Research" -> topic1.id, "Code" -> topic2.id, "Global" -> topic3.id),
@@ -76,107 +91,91 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       fontSize = 14
     )
 
-    // 2. Сохраняем состояние (без передачи пути)
-    noException should be thrownBy StateRepository.saveState(initialState)
-    Files.exists(stateFilePath) shouldBe true // Проверяем, что файл создан по ожидаемому пути
+    // Act
+    val saveResult = StateRepository.saveState(appStateToSave)
+    saveResult shouldBe a[Success[_]]
+    Files.exists(stateFilePath) shouldBe true
 
-    // --- Опционально: Проверка содержимого файла ---
     val savedJson = Files.readString(stateFilePath)
-    // Можно добавить базовые проверки на наличие ключей в JSON
-    savedJson should include ("\"globalAiModel\":\"model-2\"")
+    savedJson should include ("\"globalAiModel\":\"model-2\"") // Quick check for content
     savedJson should include ("\"fontFamily\":\"Arial\"")
-    savedJson should include ("Topic One")
-    // --- -------------------------------------- ---
+    savedJson should include ("Research Topic")
 
-    // 3. Загружаем состояние (без передачи пути)
-    var loadedState: AppState = null
-    noException should be thrownBy { loadedState = StateRepository.loadState() }
+    val loadedState = StateRepository.loadState()
 
-    // 4. Сравниваем состояния (как и раньше)
-    loadedState should not be null
-    loadedState.globalAiModel shouldBe initialState.globalAiModel
-    loadedState.fontFamily shouldBe initialState.fontFamily
-    loadedState.fontSize shouldBe initialState.fontSize
-    loadedState.activeTopicId shouldBe initialState.activeTopicId
-    loadedState.availableModels.sortBy(_.name) shouldBe initialState.availableModels.sortBy(_.name)
-    loadedState.defaultPresets.sortBy(_.name) shouldBe initialState.defaultPresets.sortBy(_.name)
-    loadedState.customPresets.sortBy(_.name) shouldBe initialState.customPresets.sortBy(_.name)
-    loadedState.buttonMappings shouldBe initialState.buttonMappings
-    loadedState.lastActiveTopicPerCategory shouldBe initialState.lastActiveTopicPerCategory
-    loadedState.topics.map(_.id).toSet shouldBe initialState.topics.map(_.id).toSet
-    loadedState.topics.sortBy(_.id) shouldBe initialState.topics.sortBy(_.id)
-
-    val loadedTopic2 = loadedState.topics.find(_.id == topic2.id)
-    loadedTopic2 shouldBe defined
-    loadedTopic2.get.title shouldBe topic2.title
-    loadedTopic2.get.category shouldBe topic2.category
-    loadedTopic2.get.dialogs.sortBy(_.timestamp) shouldBe topic2.dialogs.sortBy(_.timestamp)
-    loadedTopic2.get.createdAt.getEpochSecond shouldBe topic2.createdAt.getEpochSecond
-    loadedTopic2.get.lastUpdatedAt.getEpochSecond shouldBe topic2.lastUpdatedAt.getEpochSecond
+    // Assert
+    // For comprehensive comparison, case classes should have proper equals or use libraries like diffx
+    // Here, we rely on the default case class equals, which is field-by-field.
+    loadedState shouldBe appStateToSave 
+    
+    // Example of more granular checks if needed, though 'loadedState shouldBe appStateToSave' covers it for case classes
+    loadedState.globalAiModel shouldBe appStateToSave.globalAiModel
+    loadedState.activeTopicId shouldBe appStateToSave.activeTopicId
+    loadedState.topics.sortBy(_.id) shouldBe appStateToSave.topics.sortBy(_.id) // Compare sorted lists
+    loadedState.availableModels.sortBy(_.name) shouldBe appStateToSave.availableModels.sortBy(_.name)
   }
 
-  it should "return initial state if file does not exist" in {
-    Files.deleteIfExists(stateFilePath)
-    // Загружаем (без пути)
+  behavior of "StateRepository.loadState error handling"
+
+  it should "return AppState.initialState if the state file does not exist" in {
+    // Arrange
+    // File is deleted by withFixture or ensured non-existent by beforeAll
+
+    // Act
     val state = StateRepository.loadState()
-    // Сравниваем с AppState.initialState
-    state.topics shouldBe AppState.initialState.topics
-    state.globalAiModel shouldBe AppState.initialState.globalAiModel
-    state.activeTopicId shouldBe AppState.initialState.activeTopicId
-    // Добавим еще несколько проверок для полноты
-    state.availableModels shouldBe AppState.initialState.availableModels
-    state.defaultPresets shouldBe AppState.initialState.defaultPresets
-    state.customPresets shouldBe AppState.initialState.customPresets
-    state.buttonMappings shouldBe AppState.initialState.buttonMappings
-    state.lastActiveTopicPerCategory shouldBe AppState.initialState.lastActiveTopicPerCategory
-    state.fontFamily shouldBe AppState.initialState.fontFamily
-    state.fontSize shouldBe AppState.initialState.fontSize
+
+    // Assert
+    state shouldBe AppState.initialState
   }
 
-  it should "return initial state and backup corrupted file if file is corrupted" in {
+  it should "return AppState.initialState and backup the corrupted file if the state file is corrupted" in {
+    // Arrange
     val corruptedJson = "{ \"invalid json data, missing closing brace"
     Files.writeString(stateFilePath, corruptedJson)
 
     val state = StateRepository.loadState()
 
-    // 1. Проверяем, что возвращено начальное состояние
-    state shouldBe AppState.initialState
+    val corruptedJsonContent = "{ \"invalidJson\": true, \"message\": \"This JSON is intentionally broken\" " // Missing closing brace
+    Files.writeString(stateFilePath, corruptedJsonContent)
 
-    // 2. Проверяем, что оригинальный файл все еще содержит поврежденный JSON
-    // (поскольку мы делаем копию для бэкапа, а не перемещение)
-    Files.exists(stateFilePath) shouldBe true
-    Files.readString(stateFilePath) shouldBe corruptedJson
+    // Act
+    val state = StateRepository.loadState()
 
-    // 3. Проверяем, что создан файл бэкапа
-    val parentDir = stateFilePath.getParent
-    val filesInDir = if (parentDir != null) Files.list(parentDir) else Files.list(Paths.get(""))
-    
-    val backupFileOpt = filesInDir
-      .filter(Files.isRegularFile(_))
-      .filter(_.getFileName.toString.startsWith(s"${stateFilePath.getFileName.toString}.corrupted_"))
-      .findFirst()
+    // Assert
+    state shouldBe AppState.initialState // Should return initial state
 
-    backupFileOpt.isPresent shouldBe true
-    backupFileOpt.ifPresent { backupPath =>
-      println(s"Found backup file: $backupPath")
-      // 4. (Опционально) Проверяем содержимое бэкапа, если это важно
-      // Files.readString(backupPath) shouldBe corruptedJson
-      
-      // Очищаем бэкап файл после теста
-      try Files.deleteIfExists(backupPath) catch { case e: Exception => println(s"Could not delete backup file $backupPath: $e")}
+    Files.exists(stateFilePath) shouldBe true // Original corrupted file should still exist
+    Files.readString(stateFilePath) shouldBe corruptedJsonContent // Content should be unchanged
+
+    val parentDir = Option(stateFilePath.getParent).getOrElse(Paths.get(""))
+    val backupFileStream = Files.list(parentDir)
+    try {
+      val backupFileOpt = backupFileStream
+        .filter(Files.isRegularFile(_))
+        .filter(_.getFileName.toString.startsWith(s"${stateFilePath.getFileName.toString}.corrupted_"))
+        .findFirst()
+
+      backupFileOpt shouldBe defined // A backup file should have been created
+      backupFileOpt.ifPresent { backupPath =>
+        Files.readString(backupPath) shouldBe corruptedJsonContent // Backup content should match corrupted content
+        Files.deleteIfExists(backupPath) // Clean up the specific backup file
+      }
+    } finally {
+      backupFileStream.close() // Ensure stream is closed
     }
-    // Закрываем Stream после использования
-    filesInDir.close()
   }
   
-  it should "return initial state if file is empty" in {
-    Files.writeString(stateFilePath, "") // Создаем пустой файл
+  it should "return AppState.initialState if the state file is empty" in {
+    // Arrange
+    Files.writeString(stateFilePath, "") // Create an empty file
+
+    // Act
     val state = StateRepository.loadState()
-    state shouldBe AppState.initialState // Должно быть полное сравнение с initialState
 
-    // Дополнительно проверим, что пустой файл все еще существует (не удален)
-    Files.exists(stateFilePath) shouldBe true
-    Files.readString(stateFilePath) shouldBe ""
+    // Assert
+    state shouldBe AppState.initialState 
+
+    Files.exists(stateFilePath) shouldBe true // Empty file should still exist
+    Files.readString(stateFilePath) shouldBe "" // Content should still be empty
   }
-
 }

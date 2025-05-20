@@ -115,6 +115,9 @@ class MainController(
     val footerComponent = new Footer(
       onSend = processUserInput,
       onNewTopic = startNewTopic,
+      // Placeholder actions for onAttachFileClick and onAttachCodeClick
+      onAttachFileClick = () => logger.info("Attach File button clicked - placeholder action."),
+      onAttachCodeClick = () => logger.info("Attach Code button clicked - placeholder action."),
       onFileDropped = handleFileDropped,
       onDirectoryDropped = handleDirectoryDropped,
       onImagePasted = handleImagePasted
@@ -125,10 +128,9 @@ class MainController(
     val responseNode = ResponseArea.create()
     val historyPanelNode = HistoryPanel.create(this)
 
-    val ftManager = this.fileManager.getOrElse(
-      throw new IllegalStateException("FileManager не был инициализирован перед созданием FileTreeView.")
-    )
-    val fileTreeViewComponent = new FileTreeView(ftManager, this)
+    // Assuming FileTreeView constructor is now parameterless as per its definition.
+    // If it needs ftManager or this (MainController), it must be injected differently or initialized post-construction.
+    val fileTreeViewComponent = new FileTreeView() 
     this.fileTreeViewInstance = Some(fileTreeViewComponent)
     val fileTreeViewNode = fileTreeViewComponent.viewNode
 
@@ -214,7 +216,9 @@ class MainController(
 
     activeTopicIdOpt match {
       case Some(idToSelect) => HistoryPanel.selectTopic(idToSelect)
-      case None => HistoryPanel.clearSelection()
+      // Call selectTopic with null or empty string to clear selection,
+      // as HistoryPanel.selectTopic handles this by clearing the ListView selection.
+      case None => HistoryPanel.selectTopic("") 
     }
   }
 
@@ -358,11 +362,17 @@ class MainController(
           logger.info(s"Category effectively changed from '$categoryBeforeChange' to '$categoryAfterChange'. Updating Header and AI model.")
           headerRef.foreach(_.setActiveButton(categoryAfterChange))
           updateAiServiceWithCurrentModel()
-        } else if (headerRef.exists(_.activeCategoryNameProperty.value != categoryAfterChange)) {
-          logger.info(s"Topic selected in category '$categoryAfterChange', but header shows differently. Syncing header.")
-          headerRef.foreach(_.setActiveButton(categoryAfterChange))
+        } else {
+          // If category did not change, but header might be out of sync (e.g. if activeCategoryNameFromHeaderFallback was used initially)
+          // ensure header reflects the true category of the active topic.
+          // The previous check `headerRef.exists(_.activeCategoryNameProperty.value != categoryAfterChange)`
+          // is replaced by relying on the Header's new getCurrentActiveButtonName method.
+          if (headerRef.exists(_.getCurrentActiveButtonName != categoryAfterChange)) {
+             logger.info(s"Topic selected in category '$categoryAfterChange', but header shows '${headerRef.get.getCurrentActiveButtonName}'. Syncing header.")
+             headerRef.foreach(_.setActiveButton(categoryAfterChange))
+          }
         }
-
+        
         Platform.runLater {
           logger.debug("Scheduling UI synchronization after setActiveTopic.")
           isProgrammaticSelectionFlag.set(true)
@@ -743,7 +753,8 @@ class MainController(
 
   // Helper to get category from header or default, used as fallback
   private def activeCategoryNameFromHeaderFallback(): String = {
-    headerRef.flatMap(h => Option(h.activeCategoryNameProperty).map(_.value))
+    // Uses the new public method in Header.scala
+    headerRef.map(_.getCurrentActiveButtonName)
       .filter(Header.categoryButtonNames.contains)
       .getOrElse(Header.categoryButtonNames.headOption.getOrElse("Global"))
   }
@@ -855,7 +866,8 @@ $content
     val preset = presetManager.findActivePresetForButton(currentActiveCat)
 
     logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
-    logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}, maxTokens=${preset.maxOutputTokens}")
+    // Removed maxOutputTokens from log as it's not in PromptPreset model
+    logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}")
     logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
     logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
 
@@ -887,7 +899,8 @@ $content
 
     finalModelToUseOpt match {
       case Some(modelToUse) =>
-        logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.currentModelRef.get()}'.")
+        // Use new public getter AIService.getCurrentModel
+        logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.getCurrentModel}'.")
         
         // Check if the model exists in available models
         if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {

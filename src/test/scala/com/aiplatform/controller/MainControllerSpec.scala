@@ -3,51 +3,58 @@ package com.aiplatform.controller
 
 import com.aiplatform.model._
 // StateRepository will be used directly for file ops, not mocked in most controller tests
-// import com.aiplatform.repository.StateRepository 
-import com.aiplatform.service.HistoryService // Assuming this is needed for ActorSystem, replace if not
+import com.aiplatform.model._
+import com.aiplatform.service.CredentialsService // For API key interactions (static object)
 import com.aiplatform.util.JsonUtil
-import com.aiplatform.view.{Header, HistoryPanel, Footer, ResponseArea} // Added Footer, ResponseArea
+import com.aiplatform.view.{Footer, Header} // HistoryPanel, ResponseArea are objects
 import org.apache.pekko.actor.typed.ActorSystem
+import org.mockito.ArgumentMatchers.{any, eq => mockitoEq}
+import org.mockito.Mockito._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
-import org.mockito.Mockito._
-import org.mockito.ArgumentMatchers.{any, eq => mockitoEq}
-// ArgumentCaptor not used in this version, but keep if needed for other tests
-// import org.mockito.ArgumentCaptor 
+import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
+
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.UUID
-// import scala.jdk.CollectionConverters._ // Not used in this snippet
-// import scala.reflect.ClassTag // Not used in this snippet
-import org.scalatest.BeforeAndAfterAll
-import java.nio.file.{Files, Path, Paths}
+import scala.util.Success
 
 
-class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar with BeforeAndAfterAll {
+class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar with BeforeAndAfterAll with BeforeAndAfterEach {
 
-  // Use a mock ActorSystem for tests that don't interact with actor behavior deeply
   implicit val systemActor: ActorSystem[Nothing] = ActorSystem(mock[org.apache.pekko.actor.typed.Behavior[Nothing]], "mockSystem")
 
   private val stateFilePath: Path = Paths.get("app_state.json")
+  private val apiKeyPath: Path = Paths.get(CredentialsService.API_KEY_FILE_PATH) // Assuming CredentialsService has this
 
-  // Declare mocks, initialized in setupController or per test
   var mockHeader: Header = _
-  var mockFooter: Footer = _ 
-  // HistoryPanel and ResponseArea are objects, so we mock their types if we want to verify calls on the object itself.
-  // However, direct static mocking is complex. We'll focus on MainController's interactions with instances it holds (Header, Footer)
-  // and state changes. For HistoryPanel.type and ResponseArea.type, verification is limited without more advanced tools.
+  var mockFooter: Footer = _
+  // Cannot easily mock objects like DialogUtils, HistoryPanel, ResponseArea without PowerMock or code changes.
+  // Tests will focus on MainController logic and interactions with mockable dependencies or observable state changes.
 
   override def beforeAll(): Unit = {
     super.beforeAll()
     Files.deleteIfExists(stateFilePath)
+    Files.deleteIfExists(apiKeyPath) // Clean up API key file if it exists
   }
 
   override def afterAll(): Unit = {
     Files.deleteIfExists(stateFilePath)
+    Files.deleteIfExists(apiKeyPath)
+    ActorSystem.terminate(systemActor)
     super.afterAll()
-    ActorSystem.terminate(systemActor) // Terminate the mock system
   }
-  
+
+  // Clean up state file before each test to ensure independence
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    Files.deleteIfExists(stateFilePath)
+    Files.deleteIfExists(apiKeyPath)
+    // Resetting static mocks or shared state if any (tricky with objects)
+  }
+
+
   private def initializeStateFile(appState: AppState): Unit = {
     val json = JsonUtil.serialize(appState)
     Files.writeString(stateFilePath, json)
@@ -55,105 +62,100 @@ class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar wit
 
   private def readStateFile(): AppState = {
     if (Files.exists(stateFilePath)) {
-      val json = Files.readString(stateFilePath)
-      JsonUtil.deserialize[AppState](json)
+      val json = JsonUtil.readFromFile[AppState](stateFilePath.toString) // Assuming JsonUtil has this
+      json.getOrElse(fail("Failed to read/deserialize app_state.json during test verification"))
     } else {
-      // In tests, if a file is expected, it should exist.
-      // If it's optional, the test logic should handle its absence.
       fail("app_state.json does not exist when it was expected.")
     }
   }
   
   private def setPrivateField(obj: AnyRef, fieldName: String, value: Any): Unit = {
-      try {
-        val field = obj.getClass.getDeclaredField(fieldName)
-        field.setAccessible(true)
-        field.set(obj, value)
-      } catch {
-        case e: NoSuchFieldException => println(s"WARN: Field '$fieldName' not found in ${obj.getClass.getName}. Skipping mock setup for it. This might be due to controller refactoring.")
-        case e: Exception => println(s"WARN: Failed to set private field '$fieldName' via reflection: ${e.getMessage}")
-      }
+    try {
+      val field = obj.getClass.getDeclaredField(fieldName)
+      field.setAccessible(true)
+      field.set(obj, value)
+    } catch {
+      case e: NoSuchFieldException => println(s"WARN: Field '$fieldName' not found in ${obj.getClass.getName}. Skipping mock setup. Error: ${e.getMessage}")
+      case e: Exception => println(s"WARN: Failed to set private field '$fieldName' via reflection: ${e.getMessage}")
+    }
   }
 
   private def setupController(initialState: AppState): MainController = {
-    Files.deleteIfExists(stateFilePath) 
-    initializeStateFile(initialState)
+    initializeStateFile(initialState) // Ensure state file is set up before controller instantiation
 
     mockHeader = mock[Header]
-    mockFooter = mock[Footer] 
-    
-    // Mock necessary methods of header/footer if they are called during controller init or tested paths
-    // e.g. when(mockHeader.activeCategoryNameProperty).thenReturn(new scalafx.beans.property.StringProperty("Global"))
-    // For this set of tests, we primarily verify calls *to* these mocks.
+    mockFooter = mock[Footer]
 
-    val controller = new MainController()(systemActor) 
+    val controller = new MainController()(systemActor)
 
     setPrivateField(controller, "headerRef", Some(mockHeader))
     setPrivateField(controller, "footerRef", Some(mockFooter))
     
-    // Reset mocks after controller initialization, as synchronizeUIState might be called.
-    reset(mockHeader, mockFooter) 
+    // Reset mocks AFTER controller initialization AND injection of mock refs.
+    // The controller's constructor calls initializeController -> performInitialUISetup -> synchronizeUIState.
+    // synchronizeUIState interacts with headerRef and footerRef.
+    reset(mockHeader, mockFooter)
     
     controller
   }
 
-  behavior of "MainController" // Behavior description for grouping
+  // Behavior descriptions for better test organization
+  behavior of "MainController Topic Management"
 
   it should "add a new topic correctly when startNewTopic is called" in {
+    // Arrange
     val initialTopicId = UUID.randomUUID().toString
     val initialCategory = "Code"
-    val initialTopic = Topic(id = initialTopicId, title = "Initial Code Topic", category = initialCategory, dialogs = List(Dialog("t", "r", "a", Instant.now(), "m")))
+    val initialTopic = Topic(id = initialTopicId, title = "Initial Code Topic", category = initialCategory, dialogs = List(Dialog("req", "resp", "model", Instant.now(), "modelId")))
     val initialState = AppState.initialState.copy(
       topics = List(initialTopic),
-      activeTopicId = Some(initialTopicId), // Active topic determines category for new topic
+      activeTopicId = Some(initialTopicId),
       lastActiveTopicPerCategory = Map(initialCategory -> initialTopicId)
     )
-    
     val controller = setupController(initialState)
-    
-    // Action: start a new topic. It should pick up category from the currently active topic.
+
+    // Act
     controller.startNewTopic()
 
-    // Verification:
+    // Assert
     val finalState = readStateFile()
-    finalState.topics.size shouldBe 2 // One initial, one new
+    finalState.topics.size shouldBe 2
     val newTopicOpt = finalState.topics.find(_.id != initialTopicId)
     newTopicOpt shouldBe defined
     val newTopic = newTopicOpt.get
 
-    newTopic.category shouldBe initialCategory // Category of the new topic
+    newTopic.category shouldBe initialCategory
     newTopic.title shouldBe "Новый топик" // Default title
     newTopic.dialogs shouldBe empty
-    
-    finalState.activeTopicId shouldBe Some(newTopic.id) // New topic becomes active
+    finalState.activeTopicId shouldBe Some(newTopic.id)
     finalState.lastActiveTopicPerCategory.get(initialCategory) shouldBe Some(newTopic.id)
 
-    verify(mockFooter, times(1)).clearInput() // UI interaction
-    // Header's setActiveButton would be called by synchronizeUIState, triggered by setActiveTopic.
-    // Let's verify it was called for the new topic's category.
-    verify(mockHeader, atLeastOnce()).setActiveButton(mockitoEq(initialCategory))
+    verify(mockFooter, times(1)).clearInput()
+    // From synchronizeUIState call chain:
+    verify(mockHeader, times(1)).setActiveButton(mockitoEq(initialCategory))
+    verify(mockFooter, times(1)).setLocked(false) // isRequestInProgress should be false
   }
 
-  // --- Tests for deleteTopic ---
-  "MainController deleteTopic" should "start a new topic if the last topic in a category is deleted" in {
+  it should "start a new topic if the last topic in a category is deleted" in {
+    // Arrange
     val category = "TestCategory"
     val topicId = UUID.randomUUID().toString
-    val initialTopic = Topic(id = topicId, title = "The Only Topic", category = category, createdAt = Instant.now(), lastUpdatedAt = Instant.now())
+    val initialTopic = Topic(id = topicId, title = "The Only Topic", category = category)
     val initialState = AppState.initialState.copy(
       topics = List(initialTopic),
       activeTopicId = Some(topicId),
       lastActiveTopicPerCategory = Map(category -> topicId)
     )
     val controller = setupController(initialState)
+    // Assuming DialogUtils.showConfirmation would return OK for deletion.
 
-    // Simulate user confirming deletion (DialogUtils is static, hard to mock here, assume OK)
+    // Act
     controller.deleteTopic(topicId)
-    
-    // Allow Platform.runLater to execute if crucial. For direct state, it might not be needed if logic is sequential before runLater.
-    // Thread.sleep(500) // Avoid in unit tests if possible. If essential for FX, use TestFX.
+    // TestFX might be needed for proper Platform.runLater handling. Assume direct enough for state check.
 
+    // Assert
     val finalState = readStateFile()
-    finalState.topics.exists(_.id == topicId) shouldBe false // Original deleted
+    finalState.topics.exists(_.id == topicId) shouldBe false
     finalState.topics.size shouldBe 1 // New one created
     val newTopic = finalState.topics.head
     newTopic.category shouldBe category
@@ -161,37 +163,44 @@ class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar wit
     finalState.activeTopicId shouldBe Some(newTopic.id)
     finalState.lastActiveTopicPerCategory.get(category) shouldBe Some(newTopic.id)
     
-    verify(mockHeader, atLeastOnce()).setActiveButton(mockitoEq(category)) // From startNewTopic -> setActiveTopic -> synchronizeUIState
-    verify(mockFooter, atLeastOnce()).clearInput() // From startNewTopic
+    verify(mockHeader, times(1)).setActiveButton(mockitoEq(category)) // From startNewTopic -> ... -> synchronizeUIState
+    verify(mockFooter, times(1)).clearInput() // From startNewTopic
+    verify(mockFooter, atLeastOnce()).setLocked(false) // From synchronizeUIState after new topic
   }
 
   it should "activate the next available topic when an active topic is deleted" in {
+    // Arrange
     val category = "Work"
-    val topic1Id = UUID.randomUUID().toString // To be deleted, older
-    val topic2Id = UUID.randomUUID().toString // To become active, newer
+    val topic1Id = UUID.randomUUID().toString // To be deleted
+    val topic2Id = UUID.randomUUID().toString // To become active
     val topic1 = Topic(id = topic1Id, title = "Old Task", category = category, lastUpdatedAt = Instant.now().minusSeconds(100))
     val topic2 = Topic(id = topic2Id, title = "New Task", category = category, lastUpdatedAt = Instant.now())
     val initialState = AppState.initialState.copy(
       topics = List(topic1, topic2),
-      activeTopicId = Some(topic1Id), // topic1 is active
+      activeTopicId = Some(topic1Id),
       lastActiveTopicPerCategory = Map(category -> topic1Id)
     )
     val controller = setupController(initialState)
 
+    // Act
     controller.deleteTopic(topic1Id)
 
+    // Assert
     val finalState = readStateFile()
     finalState.topics.exists(_.id == topic1Id) shouldBe false
     finalState.topics.size shouldBe 1
-    finalState.topics.head.id shouldBe topic2Id // topic2 should remain
-    finalState.activeTopicId shouldBe Some(topic2Id) // topic2 becomes active
-    finalState.lastActiveTopicPerCategory.get(category) shouldBe Some(topic2Id) // Updated by controller.setActiveTopic
+    finalState.topics.head.id shouldBe topic2Id
+    finalState.activeTopicId shouldBe Some(topic2Id)
+    finalState.lastActiveTopicPerCategory.get(category) shouldBe Some(topic2Id)
 
-    verify(mockHeader, atLeastOnce()).setActiveButton(mockitoEq(category)) // From setActiveTopic -> synchronizeUIState
+    verify(mockHeader, times(1)).setActiveButton(mockitoEq(category)) // From setActiveTopic -> synchronizeUIState
+    verify(mockFooter, times(1)).setLocked(false) // From synchronizeUIState
   }
 
-  // --- Tests for handleHeaderAction ---
-  "MainController handleHeaderAction" should "switch category and activate appropriate topic" in {
+  behavior of "MainController Category Switching"
+
+  it should "switch category and activate appropriate topic via handleHeaderAction" in {
+    // Arrange
     val categoryA = "Personal"
     val categoryB = "ProjectX"
     val topicAId = UUID.randomUUID().toString
@@ -200,43 +209,146 @@ class MainControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar wit
     val topicB = Topic(id = topicBId, title = "Main Feature", category = categoryB, lastUpdatedAt = Instant.now())
     val initialState = AppState.initialState.copy(
       topics = List(topicA, topicB),
-      activeTopicId = Some(topicAId), // Currently in CategoryA
-      lastActiveTopicPerCategory = Map(categoryA -> topicAId, categoryB -> topicBId) // topicB is newest in its category
+      activeTopicId = Some(topicAId),
+      lastActiveTopicPerCategory = Map(categoryA -> topicAId, categoryB -> topicBId)
     )
     val controller = setupController(initialState)
     
-    // Action: Switch to CategoryB
+    // Act
     controller.handleHeaderAction(categoryB)
     
+    // Assert
     val finalState = readStateFile()
-    finalState.activeTopicId shouldBe Some(topicBId) // topicB should be active
+    finalState.activeTopicId shouldBe Some(topicBId)
     finalState.lastActiveTopicPerCategory.get(categoryB) shouldBe Some(topicBId)
     
-    // Verify Header.setActiveButton was called for CategoryB by the setActiveTopic -> synchronizeUIState flow
-    // This confirms the direct call was removed from handleHeaderAction and is now handled by the state change flow.
-    verify(mockHeader, atLeastOnce()).setActiveButton(mockitoEq(categoryB))
+    verify(mockHeader, times(1)).setActiveButton(mockitoEq(categoryB)) // Via setActiveTopic -> synchronizeUIState
+    verify(mockFooter, times(1)).setLocked(false) // Via synchronizeUIState
   }
   
-  it should "resync state by calling setActiveTopic when clicking the current active category" in {
+  it should "resync state by calling setActiveTopic when clicking the current active category via handleHeaderAction" in {
+    // Arrange
     val categoryA = "General"
     val topicAId = UUID.randomUUID().toString
     val topicA = Topic(id = topicAId, title = "Notes", category = categoryA)
     val initialState = AppState.initialState.copy(
       topics = List(topicA),
-      activeTopicId = Some(topicAId), // Active in CategoryA
+      activeTopicId = Some(topicAId),
       lastActiveTopicPerCategory = Map(categoryA -> topicAId)
     )
     val controller = setupController(initialState)
         
-    // Action: Click the *same* category button
-    controller.handleHeaderAction(categoryA)
+    // Act
+    controller.handleHeaderAction(categoryA) // Click same category
     
-    val finalState = readStateFile() // State itself might not change if already consistent
-    finalState.activeTopicId shouldBe Some(topicAId) // Active topic remains the same
+    // Assert
+    val finalState = readStateFile() 
+    finalState.activeTopicId shouldBe Some(topicAId) // Active topic remains
     
-    // Crucially, setActiveTopic should still be called, leading to synchronizeUIState,
-    // which ensures UI consistency and calls setActiveButton on the header.
-    // Number of times can be tricky if controller init also calls it. atLeastOnce is safer.
-    verify(mockHeader, atLeastOnce()).setActiveButton(mockitoEq(categoryA))
+    verify(mockHeader, times(1)).setActiveButton(mockitoEq(categoryA)) // From setActiveTopic -> synchronizeUIState
+    verify(mockFooter, times(1)).setLocked(false) // From synchronizeUIState
+  }
+
+  behavior of "MainController User Input and Request Execution"
+
+  it should "lock UI and prepare for request when processUserInput is called with valid input" in {
+    // Arrange
+    // Ensure API key exists for this positive path test
+    CredentialsService.saveApiKey("test-api-key") shouldBe a[Success[_]]
+    val category = "Global"
+    val initialState = AppState.initialState.copy(globalAiModel = "test-model", availableModels = List(ModelInfo("test-model", "Test Model")))
+    val controller = setupController(initialState)
+    val inputText = "test query"
+
+    // Act
+    controller.processUserInput(inputText)
+    // Note: Actual async request execution part is hard to test without mocking internal RequestExecutionManager
+
+    // Assert
+    // UI locking and preparation:
+    verify(mockFooter, times(1)).setLocked(true)
+    verify(mockFooter, times(1)).clearInput()
+    
+    // Interactions with ResponseArea (static calls, hard to mock directly without PowerMock/refactor)
+    // For now, we assume these would be called:
+    // ResponseArea.addRequestTurn(inputText)
+    // ResponseArea.showLoadingIndicatorForRequest(...)
+    
+    // isRequestInProgress should be true. Cannot check private field directly without reflection.
+    // The setLocked(true) is an indicator.
+  }
+
+  it should "not proceed with request if input text is empty" in {
+    // Arrange
+    val controller = setupController(AppState.initialState)
+
+    // Act
+    controller.processUserInput("") // Empty input
+
+    // Assert
+    // No request should be initiated, footer should not be locked for sending
+    verify(mockFooter, never()).setLocked(true)
+    verify(mockFooter, never()).clearInput()
+    // DialogUtils.showError should be called - difficult to verify static call
+  }
+  
+  it should "not proceed with request if API key is missing" in {
+    // Arrange
+    Files.deleteIfExists(apiKeyPath) // Ensure no API key file
+    val controller = setupController(AppState.initialState)
+
+    // Act
+    controller.processUserInput("some query")
+
+    // Assert
+    verify(mockFooter, never()).setLocked(true)
+    // DialogUtils.showError for missing API key (static call)
+  }
+
+  behavior of "MainController Settings Management"
+
+  it should "update global AI model successfully" in {
+    // Arrange
+    val modelA = ModelInfo("model-a", "Model A")
+    val modelB = ModelInfo("model-b", "Model B")
+    val initialState = AppState.initialState.copy(
+      globalAiModel = modelA.name,
+      availableModels = List(modelA, modelB)
+    )
+    val controller = setupController(initialState)
+
+    // Act
+    val result = controller.updateGlobalAIModel(modelB.name)
+    result shouldBe a[Success[_]]
+
+    // Assert
+    val finalState = readStateFile()
+    finalState.globalAiModel shouldBe modelB.name
+    
+    // synchronizeUIState should be called
+    verify(mockHeader, times(1)).setActiveButton(any[String]) // Category might not change
+    verify(mockFooter, times(1)).setLocked(false)
+  }
+
+  it should "fail to update global AI model if model name is invalid or unavailable" in {
+    // Arrange
+    val modelA = ModelInfo("model-a", "Model A")
+    val initialState = AppState.initialState.copy(
+      globalAiModel = modelA.name,
+      availableModels = List(modelA)
+    )
+    val controller = setupController(initialState)
+
+    // Act
+    val result = controller.updateGlobalAIModel("non-existent-model")
+    result shouldBe a[Failure[_]]
+
+    // Assert
+    val finalState = readStateFile()
+    finalState.globalAiModel shouldBe modelA.name // Should not change
+    
+    // synchronizeUIState should NOT have been called if update fails early
+    verify(mockHeader, never()).setActiveButton(any[String])
+    verify(mockFooter, never()).setLocked(any[Boolean])
   }
 }

@@ -162,11 +162,17 @@ class Header(onHeaderButtonClicked: String => Unit) {
     } else {
       if (activeCategoryButtonName.value.nonEmpty) {
         logger.debug(s"setActiveButton called with non-category name: '$categoryName'. Clearing category highlight.")
-        activeCategoryButtonName.value = ""
+        activeCategoryButtonName.value = "" // Clear active category if name is not a valid category
         updateHeaderButtonStyles()
       }
     }
   }
+
+  /**
+   * Возвращает имя текущей активной кнопки категории из состояния хедера.
+   */
+  def getCurrentActiveButtonName: String = activeCategoryButtonName.value
+
 } // Конец класса Header
 
 /**
