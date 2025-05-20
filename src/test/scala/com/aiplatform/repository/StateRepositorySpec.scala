@@ -144,10 +144,10 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
     Files.writeString(stateFilePath, corruptedJsonContent)
 
     // Act
-    val state = StateRepository.loadState()
+    val loadedStateAfterCorruption = StateRepository.loadState()
 
     // Assert
-    state shouldBe AppState.initialState // Should return initial state
+    loadedStateAfterCorruption shouldBe AppState.initialState // Should return initial state
 
     Files.exists(stateFilePath) shouldBe true // Original corrupted file should still exist
     Files.readString(stateFilePath) shouldBe corruptedJsonContent // Content should be unchanged

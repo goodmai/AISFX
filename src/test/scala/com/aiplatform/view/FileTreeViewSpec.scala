@@ -62,14 +62,10 @@ class FileTreeViewSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   it should "initialize correctly" in {
     fileTreeView.viewNode shouldNot be(null)
-    // Ensure the internal JFX TreeView is also initialized (part of the viewNode structure)
-    // internalJfxTreeView shouldNot be(null) // Test might be less meaningful if internalJfxTreeView is a fallback
-    (fileTreeView.viewNode match { // Check if viewNode is a JFXTreeView or contains one
-      case tv: JFXTreeView[?] => tv // Changed _ to ?
-      case _ if fileTreeView.viewNode.isInstanceOf[javafx.scene.layout.Pane] =>
-        fileTreeView.viewNode.asInstanceOf[javafx.scene.layout.Pane].getChildren.asScala.find(_.isInstanceOf[JFXTreeView[?]]).orNull
-      case _ => null
-    }) shouldNot be(null)
+    // Check that viewNode is a ScalaFX BorderPane
+    fileTreeView.viewNode.isInstanceOf[scalafx.scene.layout.BorderPane] shouldBe true
+    // Check that the internal JFXTreeView (accessed via reflection) is not null
+    internalJfxTreeView shouldNot be(null) 
   }
 
   it should "call MainController to update context when 'Add to Context' is triggered with selected files" in {

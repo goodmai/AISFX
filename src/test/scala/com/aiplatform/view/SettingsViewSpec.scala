@@ -247,7 +247,7 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
       val customListView = getPrivateUiField[SFXListView[PromptPreset]](settingsView, "customPresetsListView")
       
       callPrivateMethod(settingsView, "setupPresetSelectionHandling")
-      when(mockMainController.saveCustomPreset(any[PromptPreset])).thenReturn(Success(())) // Mock successful save
+      org.mockito.Mockito.when(mockMainController.saveCustomPreset(any[PromptPreset])).thenReturn(Success(())) // Mock successful save
 
       // Act: Click "New", fill details, click "Save Preset"
       onFxThread { callPrivateMethod(settingsView, "handleNewPreset") } // newPresetButton.fire() or call handler
@@ -280,7 +280,7 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
       val presetToSelect = commonInitialSettings.customPresets.head
       
       callPrivateMethod(settingsView, "setupPresetSelectionHandling")
-      when(mockMainController.deleteCustomPreset(any[String])).thenReturn(Success(()))
+      org.mockito.Mockito.when(mockMainController.deleteCustomPreset(any[String])).thenReturn(Success(()))
       // Mock DialogUtils.showConfirmation to return OK
       // This is complex. Assume OK for now or refactor DialogUtils.
 
