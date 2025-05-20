@@ -1,7 +1,7 @@
 // src/main/scala/com/aiplatform/service/AIService.scala
 package com.aiplatform.service
 
-import com.aiplatform.model.Dialog
+import com.aiplatform.model.{Dialog, FileTreeContext, FileSelectionState} // Added FileTreeContext, FileSelectionState
 import io.circe.parser.parse
 import io.circe.{Encoder, Json, Decoder}
 import io.circe.syntax._
@@ -114,7 +114,8 @@ class AIService(implicit classicSystem: ActorSystem) {
                topP: Option[Double],
                topK: Option[Int],
                history: List[Dialog],
-               imageData: Option[InlineData] = None
+               imageData: Option[InlineData] = None,
+               structuredFileContextOpt: Option[FileTreeContext] = None // Added new parameter
              )(implicit ec: ExecutionContext): Future[String] = {
 
     if (apiKey.trim.isEmpty) {
@@ -129,10 +130,10 @@ class AIService(implicit classicSystem: ActorSystem) {
     )
     val effectiveGenConfig = if (genConfig == GenerationConfig(maxOutputTokens = Some(8192))) None else Some(genConfig)
 
-    logger.info(s"Processing AI request. Model: $currentModelName, History size: ${history.size}, Image data present: ${imageData.isDefined}")
+    logger.info(s"Processing AI request. Model: $currentModelName, History size: ${history.size}, Image data present: ${imageData.isDefined}, Structured context present: ${structuredFileContextOpt.isDefined}")
     logger.trace(s"Generation config: Temp=${temperature.getOrElse("N/A")}, TopP=${topP.getOrElse("N/A")}, TopK=${topK.getOrElse("N/A")}")
 
-    Future.fromTry(buildRequest(prompt, apiKey, effectiveGenConfig, history, currentModelName, imageData))
+    Future.fromTry(buildRequest(prompt, apiKey, effectiveGenConfig, history, currentModelName, imageData, structuredFileContextOpt)) // Pass structuredFileContextOpt
       .flatMap { request =>
         sendRequest(request)
           .flatMap(handleResponse)
@@ -148,16 +149,29 @@ class AIService(implicit classicSystem: ActorSystem) {
                             genConfig: Option[GenerationConfig],
                             history: List[Dialog],
                             modelName: String,
-                            imageData: Option[InlineData]
+                            imageData: Option[InlineData],
+                            structuredFileContextOpt: Option[FileTreeContext] // Added new parameter
                           ): Try[Request[ApiResponse, Any]] = Try {
     val historyContents: List[Content] = history.flatMap { dialog =>
       List(
         Content(parts = List(Part(text = Some(dialog.request))), role = Some("user")),
         Content(parts = List(Part(text = Some(dialog.response))), role = Some("model"))
       )
-    }.takeRight(20)
+    }.takeRight(20) // Limit history to prevent overly large requests
 
-    val textPartOpt: Option[Part] = Some(prompt).filter(_.nonEmpty).map(t => Part(text = Some(t)))
+    // Combine base prompt with structured file context
+    val structuredContextString = structuredFileContextOpt.map { sfc =>
+      sfc.selectedFiles.map {
+        case FileSelectionState.Selected(path, content) =>
+          s"\n\n--- File: $path ---\n$content\n--- End File: $path ---"
+        case FileSelectionState.SelectionError(path, error) =>
+          s"\n\n--- File Error: $path ---\n$error\n--- End File Error ---"
+      }.mkString("") // mkString with empty separator to avoid extra newlines between file blocks
+    }.getOrElse("")
+
+    val combinedPrompt = prompt + structuredContextString // Append structured context to the existing prompt
+
+    val textPartOpt: Option[Part] = Some(combinedPrompt).filter(_.nonEmpty).map(t => Part(text = Some(t)))
     val imagePartOpt: Option[Part] = imageData.map(data => Part(inlineData = Some(data)))
     val currentUserParts: List[Part] = textPartOpt.toList ++ imagePartOpt.toList
 

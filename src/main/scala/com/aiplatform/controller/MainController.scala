@@ -57,6 +57,7 @@ class MainController(
     aiService
   )
   private val modelFetchingService = new ModelFetchingService()(system, ec)
+  private lazy val fileTreeService = new FileTreeService(this.fileManager.get) // Added FileTreeService definition
   private var fileManager: Option[FileManager] = None
 
   private var mainStage: Option[Stage] = None

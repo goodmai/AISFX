@@ -1,7 +1,7 @@
 // src/main/scala/com/aiplatform/controller/manager/RequestExecutionManager.scala
 package com.aiplatform.controller.manager
 
-import com.aiplatform.model.{Dialog, PromptPreset, Topic} // Убедимся, что PromptPreset импортирован
+import com.aiplatform.model.{Dialog, PromptPreset, Topic, FileTreeContext} // Added FileTreeContext
 import com.aiplatform.service.{AIService, InlineData}
 import org.slf4j.LoggerFactory
 import scala.concurrent.{ExecutionContext, Future}
@@ -155,9 +155,12 @@ class RequestExecutionManager(
                      categoryHint: Option[String],
                      apiKey: String,
                      imageDataOpt: Option[InlineData] = None,
-                     fileContext: Option[String] = None
+                      fileContext: Option[String] = None, // Text-based context from drag-drop
+                      structuredFileContextOpt: Option[FileTreeContext] = None // New structured context
                    ): Future[(String, Dialog)] = {
 
+    // Note: prepareRequestData currently only uses the text-based fileContext.
+    // It might need to be refactored to incorporate structuredFileContextOpt if prompt construction logic changes here.
     prepareRequestData(originalRequestText, categoryHint, fileContext) match {
       case Failure(prepError) =>
         logger.error(s"Request preparation failed: ${prepError.getMessage()}", prepError)
@@ -166,7 +169,7 @@ class RequestExecutionManager(
       // Достаем activePreset из результата prepareRequestData
       case Success((targetTopicId, topicHistory, isNewTopic, modelUsed, finalPrompt, activePreset)) =>
         logger.info(
-          s"Submitting AI request. Model: '$modelUsed', Topic ID: '$targetTopicId', isNewTopic: $isNewTopic, Image included: ${imageDataOpt.isDefined}, File context included: ${fileContext.isDefined}, Preset: '${activePreset.name}'"
+          s"Submitting AI request. Model: '$modelUsed', Topic ID: '$targetTopicId', isNewTopic: $isNewTopic, Image included: ${imageDataOpt.isDefined}, Text file context included: ${fileContext.isDefined}, Structured file context included: ${structuredFileContextOpt.isDefined}, Preset: '${activePreset.name}'"
         )
 
         Try(aiService.updateModel(modelUsed)).failed.foreach { e =>
@@ -182,7 +185,8 @@ class RequestExecutionManager(
             // maxOutputTokens is not a parameter of AIService.process and not a field in PromptPreset
             // AIService.process uses its own internal default for maxOutputTokens (e.g., 8192)
             history = topicHistory,
-            imageData = imageDataOpt
+            imageData = imageDataOpt,
+            structuredFileContextOpt = structuredFileContextOpt // Pass the new context
           ) ().flatMap { aiResponse =>
             logger.info(s"AI call successful for topic ID '$targetTopicId'. Response length: ${aiResponse.length}")
             val resultDialog = Dialog(
