@@ -3,7 +3,9 @@ package com.aiplatform.repository
 
 import com.aiplatform.model.AppState
 import com.aiplatform.util.JsonUtil // Используем наш обновленный JsonUtil
-import java.nio.file.{Files, Path, Paths, StandardOpenOption, NoSuchFileException}
+import java.nio.file.{Files, Path, Paths, StandardOpenOption, NoSuchFileException, StandardCopyOption}
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import org.slf4j.LoggerFactory
 import scala.util.{Try, Success, Failure}
 import scala.util.control.NonFatal
@@ -65,8 +67,18 @@ object StateRepository {
       case e: Exception if e.getMessage == "State file is empty" =>
         // Мы сами бросили это исключение выше для пустого файла
         Success(AppState.initialState) // Возвращаем Success с начальным состоянием
-      case e: Throwable => // Ловим все остальные ошибки (ошибка чтения, ошибка парсинга JSON и т.д.)
-        logger.error(s"Failed to load or parse state from ${STATE_FILE_PATH.toAbsolutePath}. Using initial state.", e)
+      case NonFatal(e) => // Ловим все остальные не фатальные ошибки (ошибка чтения, ошибка парсинга JSON и т.д.)
+        logger.error(s"Failed to load or parse state from ${STATE_FILE_PATH.toAbsolutePath}. Attempting to backup and use initial state.", e)
+        // Попытка бэкапа поврежденного файла
+        Try {
+          val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+          val backupPath = Paths.get(s"${STATE_FILE_PATH.toString}.corrupted_$timestamp")
+          Files.copy(STATE_FILE_PATH, backupPath, StandardCopyOption.REPLACE_EXISTING)
+          logger.info(s"Backed up corrupted state file to ${backupPath.toAbsolutePath}")
+        }.recover {
+          case NonFatal(backupEx) =>
+            logger.error(s"Failed to backup corrupted state file ${STATE_FILE_PATH.toAbsolutePath}", backupEx)
+        }
         Success(AppState.initialState) // При любой другой ошибке - возвращаем Success с начальным состоянием
     }.get // Теперь .get вызывается на Success[AppState], что безопасно и корректно
   }

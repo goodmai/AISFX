@@ -123,17 +123,60 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
     state.topics shouldBe AppState.initialState.topics
     state.globalAiModel shouldBe AppState.initialState.globalAiModel
     state.activeTopicId shouldBe AppState.initialState.activeTopicId
-    // ...
+    // Добавим еще несколько проверок для полноты
+    state.availableModels shouldBe AppState.initialState.availableModels
+    state.defaultPresets shouldBe AppState.initialState.defaultPresets
+    state.customPresets shouldBe AppState.initialState.customPresets
+    state.buttonMappings shouldBe AppState.initialState.buttonMappings
+    state.lastActiveTopicPerCategory shouldBe AppState.initialState.lastActiveTopicPerCategory
+    state.fontFamily shouldBe AppState.initialState.fontFamily
+    state.fontSize shouldBe AppState.initialState.fontSize
   }
 
-  it should "return initial state if file is corrupted" in {
-    // Пишем мусор в файл по умолчанию
-    Files.writeString(stateFilePath, "{ \"invalid json data ")
-    // Загружаем (без пути)
+  it should "return initial state and backup corrupted file if file is corrupted" in {
+    val corruptedJson = "{ \"invalid json data, missing closing brace"
+    Files.writeString(stateFilePath, corruptedJson)
+
     val state = StateRepository.loadState()
-    state.topics shouldBe AppState.initialState.topics
-    state.globalAiModel shouldBe AppState.initialState.globalAiModel
-    state.activeTopicId shouldBe AppState.initialState.activeTopicId
+
+    // 1. Проверяем, что возвращено начальное состояние
+    state shouldBe AppState.initialState
+
+    // 2. Проверяем, что оригинальный файл все еще содержит поврежденный JSON
+    // (поскольку мы делаем копию для бэкапа, а не перемещение)
+    Files.exists(stateFilePath) shouldBe true
+    Files.readString(stateFilePath) shouldBe corruptedJson
+
+    // 3. Проверяем, что создан файл бэкапа
+    val parentDir = stateFilePath.getParent
+    val filesInDir = if (parentDir != null) Files.list(parentDir) else Files.list(Paths.get(""))
+    
+    val backupFileOpt = filesInDir
+      .filter(Files.isRegularFile(_))
+      .filter(_.getFileName.toString.startsWith(s"${stateFilePath.getFileName.toString}.corrupted_"))
+      .findFirst()
+
+    backupFileOpt.isPresent shouldBe true
+    backupFileOpt.ifPresent { backupPath =>
+      println(s"Found backup file: $backupPath")
+      // 4. (Опционально) Проверяем содержимое бэкапа, если это важно
+      // Files.readString(backupPath) shouldBe corruptedJson
+      
+      // Очищаем бэкап файл после теста
+      try Files.deleteIfExists(backupPath) catch { case e: Exception => println(s"Could not delete backup file $backupPath: $e")}
+    }
+    // Закрываем Stream после использования
+    filesInDir.close()
+  }
+  
+  it should "return initial state if file is empty" in {
+    Files.writeString(stateFilePath, "") // Создаем пустой файл
+    val state = StateRepository.loadState()
+    state shouldBe AppState.initialState // Должно быть полное сравнение с initialState
+
+    // Дополнительно проверим, что пустой файл все еще существует (не удален)
+    Files.exists(stateFilePath) shouldBe true
+    Files.readString(stateFilePath) shouldBe ""
   }
 
 }

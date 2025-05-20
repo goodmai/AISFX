@@ -255,14 +255,25 @@ class MainController(
     if (buttonName == "Settings") {
       showSettingsWindow()
     } else if (Header.categoryButtonNames.contains(buttonName)) {
-      val currentActiveCat = activeCategoryName
-      if (buttonName != currentActiveCat) {
-        logger.info(s"Switching active category from '$currentActiveCat' to '$buttonName'")
-        headerRef.foreach(_.setActiveButton(buttonName))
+      // Determine the logical current category based on actual application state,
+      // not necessarily what the header UI element currently shows.
+      val logicalCurrentCategory = currentAppState.activeTopicId
+        .flatMap(topicManager.findTopicById)
+        .map(_.category)
+        .getOrElse(activeCategoryNameFromHeaderFallback()) // Fallback if no active topic
+
+      if (buttonName != logicalCurrentCategory) {
+        logger.info(s"User requested category switch from '$logicalCurrentCategory' to '$buttonName'")
+        // No longer call setActiveButton on header directly here.
+        // setActiveTopic will handle updating the header after state changes.
         val nextActiveTopicIdOpt = topicManager.determineActiveTopicForCategory(buttonName)
         setActiveTopic(nextActiveTopicIdOpt)
       } else {
-        logger.debug("Category button '{}' re-clicked. No category change.", buttonName)
+        logger.debug(s"Category button '$buttonName' re-clicked, but logical current category is already '$buttonName'. Forcing resync or state is inconsistent.")
+        // If logicalCurrentCategory is already buttonName, user might be trying to "refresh" or
+        // there was a previous UI inconsistency. Resyncing by calling setActiveTopic for this category.
+        val nextActiveTopicIdOpt = topicManager.determineActiveTopicForCategory(buttonName)
+        setActiveTopic(nextActiveTopicIdOpt) // Resync based on the clicked category.
       }
     } else {
       logger.warn("Unhandled header button action: {}", buttonName)
@@ -387,13 +398,18 @@ class MainController(
                 logger.info(
                   s"Topic '$topicId' deleted. TopicManager suggests next active ID: ${nextActiveIdOpt.getOrElse("None")}."
                 )
-                setActiveTopic(nextActiveIdOpt)
-                Platform.runLater {
-                  if (nextActiveIdOpt.isEmpty && topicManager.getTopicsForCategory(categoryOfDeletedTopic).isEmpty) {
+                // If no next topic is suggested AND the category of the deleted topic is now empty,
+                // then start a new topic in that category. startNewTopic will call setActiveTopic.
+                if (nextActiveIdOpt.isEmpty && topicManager.getTopicsForCategory(categoryOfDeletedTopic).isEmpty) {
+                  Platform.runLater { // Defer to ensure state is settled from delete
                     logger.info(s"Category '$categoryOfDeletedTopic' is empty after deletion and no other topic became active. Creating new topic in this category.")
+                    // Ensure the header reflects the category where the new topic will be created.
                     headerRef.foreach(_.setActiveButton(categoryOfDeletedTopic))
-                    startNewTopic()
+                    startNewTopic() // This will internally call setActiveTopic for the new topic.
                   }
+                } else {
+                  // Otherwise, set the suggested next active topic (which might be None, handled by setActiveTopic).
+                  setActiveTopic(nextActiveIdOpt)
                 }
               case Failure(e) =>
                 logger.error(s"Failed to delete topic '$topicId'.", e)
@@ -725,16 +741,20 @@ class MainController(
   private def getApiKey(): Option[String] = CredentialsService.loadApiKey() // () добавлены
   private def currentAppState: AppState = stateManager.getState // () добавлены
 
-  private def activeCategoryName: String = {
+  // Helper to get category from header or default, used as fallback
+  private def activeCategoryNameFromHeaderFallback(): String = {
     headerRef.flatMap(h => Option(h.activeCategoryNameProperty).map(_.value))
       .filter(Header.categoryButtonNames.contains)
-      .getOrElse {
-        currentAppState.activeTopicId // Используем currentAppState напрямую
-          .flatMap(topicManager.findTopicById)
-          .map(_.category)
-          .filter(Header.categoryButtonNames.contains)
-          .getOrElse(Header.categoryButtonNames.headOption.getOrElse("Global"))
-      }
+      .getOrElse(Header.categoryButtonNames.headOption.getOrElse("Global"))
+  }
+
+  private def activeCategoryName: String = {
+    // Prioritize category from the currently active topic in the state
+    currentAppState.activeTopicId
+      .flatMap(topicManager.findTopicById)
+      .map(_.category)
+      .filter(Header.categoryButtonNames.contains)
+      .getOrElse(activeCategoryNameFromHeaderFallback()) // Fallback to header's state or default
   }
 
   private def fetchModelsAndUpdateState(): Future[Unit] = { // () добавлены
