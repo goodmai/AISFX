@@ -130,7 +130,7 @@ class MainController(
 
     // Assuming FileTreeView constructor is now parameterless as per its definition.
     // If it needs ftManager or this (MainController), it must be injected differently or initialized post-construction.
-    val fileTreeViewComponent = new FileTreeView() 
+    val fileTreeViewComponent = new FileTreeView(this.fileManager.get, this) // <<< Исправлено здесь
     this.fileTreeViewInstance = Some(fileTreeViewComponent)
     val fileTreeViewNode = fileTreeViewComponent.viewNode
 
@@ -218,7 +218,7 @@ class MainController(
       case Some(idToSelect) => HistoryPanel.selectTopic(idToSelect)
       // Call selectTopic with null or empty string to clear selection,
       // as HistoryPanel.selectTopic handles this by clearing the ListView selection.
-      case None => HistoryPanel.selectTopic("") 
+      case None => HistoryPanel.selectTopic("")
     }
   }
 
@@ -368,11 +368,11 @@ class MainController(
           // The previous check `headerRef.exists(_.activeCategoryNameProperty.value != categoryAfterChange)`
           // is replaced by relying on the Header's new getCurrentActiveButtonName method.
           if (headerRef.exists(_.getCurrentActiveButtonName != categoryAfterChange)) {
-             logger.info(s"Topic selected in category '$categoryAfterChange', but header shows '${headerRef.get.getCurrentActiveButtonName}'. Syncing header.")
-             headerRef.foreach(_.setActiveButton(categoryAfterChange))
+            logger.info(s"Topic selected in category '$categoryAfterChange', but header shows '${headerRef.get.getCurrentActiveButtonName}'. Syncing header.")
+            headerRef.foreach(_.setActiveButton(categoryAfterChange))
           }
         }
-        
+
         Platform.runLater {
           logger.debug("Scheduling UI synchronization after setActiveTopic.")
           isProgrammaticSelectionFlag.set(true)
@@ -439,23 +439,23 @@ class MainController(
       DialogUtils.showError("Невозможно обработать файл во время выполнения запроса.", ownerWindow = mainStage)
       return
     }
-    
+
     fileManager.foreach { manager =>
       // Read file content for processing by the AI model
       manager.readFileContent(file) match {
-        case Success(content) => 
+        case Success(content) =>
           // Calculate file size
           val fileSizeKB = file.length() / 1024
           val fileSizeMB = fileSizeKB / 1024.0
           val fileSizeStr = if (fileSizeMB >= 1.0) f"$fileSizeMB%.2f MB" else s"$fileSizeKB KB"
-          
+
           // Prepare preview
           val contentPreview = if (content.length > 200) {
             content.substring(0, 200) + "..."
           } else {
             content
           }
-          
+
           // Check if file is too large
           val maxFileSizeKB = 500
           if (fileSizeKB > maxFileSizeKB) {
@@ -464,7 +464,7 @@ class MainController(
             DialogUtils.showWarning(warningMsg, ownerWindow = mainStage)
           } else {
             // Show confirmation dialog with preview
-            val confirmationMsg = 
+            val confirmationMsg =
               s"""Добавить файл "${file.getName}" ($fileSizeStr) в контекст для AI модели?
                  |
                  |Предпросмотр содержимого:
@@ -473,22 +473,22 @@ class MainController(
                  |```
                  |
                  |Содержимое файла будет отправлено в AI модель с вашим следующим запросом.""".stripMargin
-                 
+
             DialogUtils.showConfirmation(confirmationMsg, ownerWindow = mainStage).foreach {
-            case ButtonType.OK => 
-              // User confirmed, add file content to pending context with proper escaping
-              val escapedContent = escapeFileContent(content)
-              appendToFileContext(file.getName, escapedContent)
-              
-              // Also append formatted text to UI footer
-              manager.readFileAndAppendToFooter(file)
-              
-              // Show feedback to user
-              Platform.runLater {
-                DialogUtils.showInfo(s"Файл ${file.getName} добавлен в контекст. Содержимое будет отправлено с вашим следующим запросом.", ownerWindow = mainStage)
-              }
-            case _ => 
-              logger.debug(s"User declined to add file ${file.getName} to context")
+              case ButtonType.OK =>
+                // User confirmed, add file content to pending context with proper escaping
+                val escapedContent = escapeFileContent(content)
+                appendToFileContext(file.getName, escapedContent)
+
+                // Also append formatted text to UI footer
+                manager.readFileAndAppendToFooter(file)
+
+                // Show feedback to user
+                Platform.runLater {
+                  DialogUtils.showInfo(s"Файл ${file.getName} добавлен в контекст. Содержимое будет отправлено с вашим следующим запросом.", ownerWindow = mainStage)
+                }
+              case _ =>
+                logger.debug(s"User declined to add file ${file.getName} to context")
             }
           }
         case Failure(e) =>
@@ -504,7 +504,7 @@ class MainController(
       DialogUtils.showError("Невозможно обработать папку во время выполнения запроса.", ownerWindow = mainStage)
       return
     }
-    
+
     // Only display folder structure in footer, no context for AI yet
     // Could be extended to add folder structure to context as well
     fileManager.foreach(_.attachFolderContext())
@@ -595,7 +595,7 @@ class MainController(
       imageDataOpt,
       fileContextOpt
     )
-    
+
     // Clear file context after submitting the request
     clearFileContext()
     resultFuture.onComplete { resultTry =>
@@ -699,10 +699,10 @@ class MainController(
     }
 
     logger.info(s"Attempting to update global AI model in AppState to '$trimmedModelName'.")
-    
+
     // Fetch current state before the update to be able to compare before/after
     val currentState = stateManager.getState
-    
+
     // Check if model exists in available models before attempting the update
     if (!currentState.availableModels.exists(_.name == trimmedModelName)) {
       val availableNames = currentState.availableModels.map(m => s"'${m.name}'").mkString(", ")
@@ -710,19 +710,19 @@ class MainController(
       logger.error(s"Cannot set global model: $errorMsg")
       return Failure(new IllegalArgumentException(errorMsg))
     }
-    
+
     // Only proceed with update if the model name has changed
     if (currentState.globalAiModel == trimmedModelName) {
       logger.debug("Global model is already set to '{}'. No change to AppState.", trimmedModelName)
       return Success(())
     }
-    
+
     val result = stateManager.updateState { state =>
       logger.info(s"Updating global AI model in AppState from '${state.globalAiModel}' to '$trimmedModelName'.")
       state.copy(globalAiModel = trimmedModelName)
     }
-    
-    result.foreach { _ => 
+
+    result.foreach { _ =>
       // Validate that the update was successful by checking the current state
       val updatedState = stateManager.getState
       if (updatedState.globalAiModel == trimmedModelName) {
@@ -735,11 +735,11 @@ class MainController(
         logger.warn(s"State update succeeded but global AI model doesn't match. Expected '$trimmedModelName', got '${updatedState.globalAiModel}'.")
       }
     }
-    
+
     result.failed.foreach { error =>
       logger.error(s"Failed to update global AI model to '$trimmedModelName'", error)
     }
-    
+
     result
   }
 
@@ -812,14 +812,11 @@ class MainController(
     // Format file content with clear structure and proper line endings
     val formattedContent = s"""
 File: ${sanitizeFileName(fileName)}
-```
 $content
-```
-
 """
-    pendingFileContext.append(formattedContent)
+       pendingFileContext.append(formattedContent)
     logger.debug(s"Added content from $fileName to file context. Total context size: ${pendingFileContext.length}")
-    
+
     // Log context for debugging
     if (logger.isDebugEnabled) {
       val contextPreview = if (pendingFileContext.length > 500) {
@@ -828,124 +825,124 @@ $content
         pendingFileContext.toString
       }
       logger.debug(s"Current file context:\n$contextPreview")
-    }
   }
-  
-  /**
-   * Sanitizes filename to prevent possible injection or formatting issues
-   */
-  private def sanitizeFileName(fileName: String): String = {
-    // Remove potential problematic characters
-    fileName.replaceAll("[\\n\\r\\t`]", "")
+}
+
+/**
+ * Sanitizes filename to prevent possible injection or formatting issues
+ */
+private def sanitizeFileName(fileName: String): String = {
+  // Remove potential problematic characters
+  fileName.replaceAll("[\\n\\r\\t`]", "")
+}
+
+/**
+ * Escapes special characters in file content
+ * to prevent issues with JSON formatting or markdown interpretation
+ */
+private def escapeFileContent(content: String): String = {
+  // Replace backslashes with double backslashes to preserve them in JSON
+  // Replace backticks to prevent breaking markdown code blocks
+  content
+    .replace("\\", "\\\\")
+    .replace("\b", "\\b")
+    .replace("\f", "\\f")
+    .replace("\r", "\\r")
+}
+
+private def clearFileContext(): Unit = {
+  if (pendingFileContext.nonEmpty) {
+    logger.debug(s"Clearing file context (size was: ${pendingFileContext.length})")
+    pendingFileContext.clear()
   }
-  
-  /**
-   * Escapes special characters in file content
-   * to prevent issues with JSON formatting or markdown interpretation
-   */
-  private def escapeFileContent(content: String): String = {
-    // Replace backslashes with double backslashes to preserve them in JSON
-    // Replace backticks to prevent breaking markdown code blocks
-    content
-      .replace("\\", "\\\\")
-      .replace("\b", "\\b")
-      .replace("\f", "\\f")
-      .replace("\r", "\\r")
-  }
-  
-  private def clearFileContext(): Unit = {
-    if (pendingFileContext.nonEmpty) {
-      logger.debug(s"Clearing file context (size was: ${pendingFileContext.length})")
-      pendingFileContext.clear()
-    }
-  }
+}
 
-  private def updateAiServiceWithCurrentModel(): Unit = {
-    val state = currentAppState
-    val currentActiveCat = activeCategoryName
-    val preset = presetManager.findActivePresetForButton(currentActiveCat)
+private def updateAiServiceWithCurrentModel(): Unit = {
+  val state = currentAppState
+  val currentActiveCat = activeCategoryName
+  val preset = presetManager.findActivePresetForButton(currentActiveCat)
 
-    logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
-    // Removed maxOutputTokens from log as it's not in PromptPreset model
-    logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}")
-    logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
-    logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
+  logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
+  // Removed maxOutputTokens from log as it's not in PromptPreset model
+  logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}")
+  logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
+  logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
 
-    // Get model name to use, with priority to preset override, then global model, then first available model
-    val modelToUseOpt: Option[String] = preset.modelOverride
-      .filter(_.nonEmpty)
-      .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
-      .orElse(state.availableModels.headOption.map(_.name).filter(_.nonEmpty))
+  // Get model name to use, with priority to preset override, then global model, then first available model
+  val modelToUseOpt: Option[String] = preset.modelOverride
+    .filter(_.nonEmpty)
+    .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
+    .orElse(state.availableModels.headOption.map(_.name).filter(_.nonEmpty))
 
-    // Special handling for Flash model variants
-    val finalModelToUseOpt = modelToUseOpt.map { modelName =>
-      val isFlashVariant = modelName.contains("flash")
-      val modelExists = state.availableModels.exists(_.name == modelName)
-      
-      if (isFlashVariant && !modelExists) {
-        // Try to find a suitable Flash model from available models
-        val availableFlashModels = state.availableModels.filter(m => m.name.contains("flash"))
-        if (availableFlashModels.nonEmpty) {
-          logger.info(s"Flash model '$modelName' not found. Using alternative Flash model: '${availableFlashModels.head.name}'")
-          availableFlashModels.head.name
-        } else {
-          // If no Flash models available, use the original model name (will be handled by fallback logic)
-          modelName
-        }
+  // Special handling for Flash model variants
+  val finalModelToUseOpt = modelToUseOpt.map { modelName =>
+    val isFlashVariant = modelName.contains("flash")
+    val modelExists = state.availableModels.exists(_.name == modelName)
+
+    if (isFlashVariant && !modelExists) {
+      // Try to find a suitable Flash model from available models
+      val availableFlashModels = state.availableModels.filter(m => m.name.contains("flash"))
+      if (availableFlashModels.nonEmpty) {
+        logger.info(s"Flash model '$modelName' not found. Using alternative Flash model: '${availableFlashModels.head.name}'")
+        availableFlashModels.head.name
       } else {
+        // If no Flash models available, use the original model name (will be handled by fallback logic)
         modelName
       }
-    }
-
-    finalModelToUseOpt match {
-      case Some(modelToUse) =>
-        // Use new public getter AIService.getCurrentModel
-        logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.getCurrentModel}'.")
-        
-        // Check if the model exists in available models
-        if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
-          val fallbackModel = state.availableModels.head.name
-          logger.warn(
-            s"Model '$modelToUse' (determined for category '$currentActiveCat') not found in available models. Falling back to '$fallbackModel'."
-          )
-          
-          // Update model in AIService
-          Try(aiService.updateModel(fallbackModel)) match {
-            case Success(_) => 
-              logger.info(s"Successfully updated AIService model to fallback '$fallbackModel'")
-              // If we're using a fallback and the global model doesn't match, update it
-              if (state.globalAiModel == modelToUse) {
-                logger.info(s"Updating global model from '$modelToUse' to fallback '$fallbackModel'")
-                stateManager.updateState(s => s.copy(globalAiModel = fallbackModel))
-              }
-            case Failure(e) =>
-              logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e)
-          }
-        } else {
-          logger.info(s"Setting AI service model to: '$modelToUse' (for category '$currentActiveCat')")
-          Try(aiService.updateModel(modelToUse)) match {
-            case Success(_) => 
-              logger.info(s"Successfully updated AIService model to '$modelToUse'")
-              // Ensure model is saved in state if it's different from current global model
-              if (preset.modelOverride.isEmpty && state.globalAiModel != modelToUse) {
-                logger.info(s"Synchronizing global model with active model: '$modelToUse'")
-                stateManager.updateState(s => s.copy(globalAiModel = modelToUse))
-              }
-            case Failure(e) =>
-              logger.error(s"Failed to update AIService model to '$modelToUse'", e)
-          }
-        }
-      case None =>
-        logger.error(s"Failed to determine any AI model to use for category '$currentActiveCat'. AIService model not updated. This can happen if no global model is set and no presets override it, and the available models list is empty.")
-    }
-  }
-
-  private def validateInputLength(text: String): Option[String] = {
-    val maxLength = 30000
-    if (text.length > maxLength) {
-      Some(f"Запрос слишком длинный (${text.length}%,d / $maxLength%,d символов). Пожалуйста, сократите его.")
     } else {
-      None
+      modelName
     }
   }
+
+  finalModelToUseOpt match {
+    case Some(modelToUse) =>
+      // Use new public getter AIService.getCurrentModel
+      logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.getCurrentModel}'.")
+
+      // Check if the model exists in available models
+      if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
+        val fallbackModel = state.availableModels.head.name
+        logger.warn(
+          s"Model '$modelToUse' (determined for category '$currentActiveCat') not found in available models. Falling back to '$fallbackModel'."
+        )
+
+        // Update model in AIService
+        Try(aiService.updateModel(fallbackModel)) match {
+          case Success(_) =>
+            logger.info(s"Successfully updated AIService model to fallback '$fallbackModel'")
+            // If we're using a fallback and the global model doesn't match, update it
+            if (state.globalAiModel == modelToUse) {
+              logger.info(s"Updating global model from '$modelToUse' to fallback '$fallbackModel'")
+              stateManager.updateState(s => s.copy(globalAiModel = fallbackModel))
+            }
+          case Failure(e) =>
+            logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e)
+        }
+      } else {
+        logger.info(s"Setting AI service model to: '$modelToUse' (for category '$currentActiveCat')")
+        Try(aiService.updateModel(modelToUse)) match {
+          case Success(_) =>
+            logger.info(s"Successfully updated AIService model to '$modelToUse'")
+            // Ensure model is saved in state if it's different from current global model
+            if (preset.modelOverride.isEmpty && state.globalAiModel != modelToUse) {
+              logger.info(s"Synchronizing global model with active model: '$modelToUse'")
+              stateManager.updateState(s => s.copy(globalAiModel = modelToUse))
+            }
+          case Failure(e) =>
+            logger.error(s"Failed to update AIService model to '$modelToUse'", e)
+        }
+      }
+    case None =>
+      logger.error(s"Failed to determine any AI model to use for category '$currentActiveCat'. AIService model not updated. This can happen if no global model is set and no presets override it, and the available models list is empty.")
+  }
+}
+
+private def validateInputLength(text: String): Option[String] = {
+  val maxLength = 30000
+  if (text.length > maxLength) {
+    Some(f"Запрос слишком длинный (${text.length}%,d / $maxLength%,d символов). Пожалуйста, сократите его.")
+  } else {
+    None
+  }
+}
 }
