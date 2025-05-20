@@ -9,7 +9,7 @@ import com.aiplatform.controller.manager.{
   TopicManager
 }
 import com.aiplatform.model.*
-import com.aiplatform.service.{AIService, CredentialsService, ModelFetchingService, InlineData}
+import com.aiplatform.service.{AIService, CredentialsService, FileTreeService, ModelFetchingService, InlineData}
 import com.aiplatform.view.{
   CurrentSettings,
   DialogUtils,
@@ -881,149 +881,149 @@ $content
         pendingFileContext.toString
       }
       logger.debug(s"Current text-based file context:\n$contextPreview")
+    }
   }
-}
 
-/**
- * Sanitizes filename to prevent possible injection or formatting issues in text-based context.
- */
-private def sanitizeFileName(fileName: String): String = {
-  // Remove potential problematic characters like newlines, tabs, backticks
-  fileName.replaceAll("[\\n\\r\\t`]", "")
-}
-
-/**
- * Escapes special characters in file content for text-based context.
- * This helps prevent issues with JSON formatting or markdown interpretation if context is embedded.
- */
-private def escapeFileContent(content: String): String = {
-  // Basic escaping for common problematic characters in text formats.
-  // Example: replace backslashes to avoid issues if this content is embedded in JSON string.
-  // Replace backticks if content is displayed in Markdown without proper fencing.
-  content
-    .replace("\\", "\\\\") // Escape backslashes
-    .replace("`", "'")   // Replace backticks with single quotes as a simple strategy
-  // Further escaping might be needed depending on how this text context is used.
-}
-
-// Clears the StringBuilder-based text file context
-private def clearFileContext(): Unit = {
-  if (pendingFileContext.nonEmpty) {
-    logger.debug(s"Clearing StringBuilder (text-based) file context (size was: ${pendingFileContext.length})")
-    pendingFileContext.clear()
+  /**
+   * Sanitizes filename to prevent possible injection or formatting issues in text-based context.
+   */
+  private def sanitizeFileName(fileName: String): String = {
+    // Remove potential problematic characters like newlines, tabs, backticks
+    fileName.replaceAll("[\\n\\r\\t`]", "")
   }
-}
 
-// Clears the structured FileTreeContext from AppState
-private def clearStructuredFileContext(): Unit = {
-  logger.info("Attempting to clear structured FileTreeContext (from FileTreeView) in AppState.")
-  if (currentAppState.fileContext.isDefined) {
-    val updateResult = stateManager.updateState { currentState =>
-      // Only update if it's actually defined, to avoid unnecessary state changes/saves
-      if (currentState.fileContext.isDefined) {
-        currentState.copy(fileContext = None)
-      } else {
-        currentState // No change needed if already None (should not happen due to outer check, but safe)
+  /**
+   * Escapes special characters in file content for text-based context.
+   * This helps prevent issues with JSON formatting or markdown interpretation if context is embedded.
+   */
+  private def escapeFileContent(content: String): String = {
+    // Basic escaping for common problematic characters in text formats.
+    // Example: replace backslashes to avoid issues if this content is embedded in JSON string.
+    // Replace backticks if content is displayed in Markdown without proper fencing.
+    content
+      .replace("\\", "\\\\") // Escape backslashes
+      .replace("`", "'")   // Replace backticks with single quotes as a simple strategy
+    // Further escaping might be needed depending on how this text context is used.
+  }
+
+  // Clears the StringBuilder-based text file context
+  private def clearFileContext(): Unit = {
+    if (pendingFileContext.nonEmpty) {
+      logger.debug(s"Clearing StringBuilder (text-based) file context (size was: ${pendingFileContext.length})")
+      pendingFileContext.clear()
+    }
+  }
+
+  // Clears the structured FileTreeContext from AppState
+  private def clearStructuredFileContext(): Unit = {
+    logger.info("Attempting to clear structured FileTreeContext (from FileTreeView) in AppState.")
+    if (currentAppState.fileContext.isDefined) {
+      val updateResult = stateManager.updateState { currentState =>
+        // Only update if it's actually defined, to avoid unnecessary state changes/saves
+        if (currentState.fileContext.isDefined) {
+          currentState.copy(fileContext = None)
+        } else {
+          currentState // No change needed if already None (should not happen due to outer check, but safe)
+        }
       }
-    }
-    updateResult match {
-      case Success(_) =>
-        logger.info("Successfully cleared structured FileTreeContext in AppState (or it was already None).")
-      case Failure(e) =>
-        logger.error("Failed to clear structured FileTreeContext in AppState.", e)
-        // User notification might be excessive here if it's an internal clear operation (e.g., after request).
-    }
-  } else {
-    logger.debug("Structured FileTreeContext is already None in AppState. No update needed.")
-  }
-}
-
-private def updateAiServiceWithCurrentModel(): Unit = {
-  val state = currentAppState
-  val currentActiveCat = activeCategoryName
-  val preset = presetManager.findActivePresetForButton(currentActiveCat)
-
-  logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
-  // Removed maxOutputTokens from log as it's not in PromptPreset model
-  logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}")
-  logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
-  logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
-
-  // Get model name to use, with priority to preset override, then global model, then first available model
-  val modelToUseOpt: Option[String] = preset.modelOverride
-    .filter(_.nonEmpty)
-    .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
-    .orElse(state.availableModels.headOption.map(_.name).filter(_.nonEmpty))
-
-  // Special handling for Flash model variants
-  val finalModelToUseOpt = modelToUseOpt.map { modelName =>
-    val isFlashVariant = modelName.contains("flash")
-    val modelExists = state.availableModels.exists(_.name == modelName)
-
-    if (isFlashVariant && !modelExists) {
-      // Try to find a suitable Flash model from available models
-      val availableFlashModels = state.availableModels.filter(m => m.name.contains("flash"))
-      if (availableFlashModels.nonEmpty) {
-        logger.info(s"Flash model '$modelName' not found. Using alternative Flash model: '${availableFlashModels.head.name}'")
-        availableFlashModels.head.name
-      } else {
-        // If no Flash models available, use the original model name (will be handled by fallback logic)
-        modelName
+      updateResult match {
+        case Success(_) =>
+          logger.info("Successfully cleared structured FileTreeContext in AppState (or it was already None).")
+        case Failure(e) =>
+          logger.error("Failed to clear structured FileTreeContext in AppState.", e)
+          // User notification might be excessive here if it's an internal clear operation (e.g., after request).
       }
     } else {
-      modelName
+      logger.debug("Structured FileTreeContext is already None in AppState. No update needed.")
     }
   }
 
-  finalModelToUseOpt match {
-    case Some(modelToUse) =>
-      // Use new public getter AIService.getCurrentModel
-      logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.getCurrentModel}'.")
+  private def updateAiServiceWithCurrentModel(): Unit = {
+    val state = currentAppState
+    val currentActiveCat = activeCategoryName
+    val preset = presetManager.findActivePresetForButton(currentActiveCat)
 
-      // Check if the model exists in available models
-      if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
-        val fallbackModel = state.availableModels.head.name
-        logger.warn(
-          s"Model '$modelToUse' (determined for category '$currentActiveCat') not found in available models. Falling back to '$fallbackModel'."
-        )
+    logger.info(s"Updating AI Service model. Current Category: '$currentActiveCat', Preset: '${preset.name}'.")
+    // Removed maxOutputTokens from log as it's not in PromptPreset model
+    logger.debug(s"Preset details: modelOverride=${preset.modelOverride}, temp=${preset.temperature}, topP=${preset.topP}, topK=${preset.topK}")
+    logger.debug(s"Global model in current AppState: '${state.globalAiModel}'")
+    logger.debug(s"Available models in current AppState: ${state.availableModels.map(_.name).mkString(", ")}")
 
-        // Update model in AIService
-        Try(aiService.updateModel(fallbackModel)) match {
-          case Success(_) =>
-            logger.info(s"Successfully updated AIService model to fallback '$fallbackModel'")
-            // If we're using a fallback and the global model doesn't match, update it
-            if (state.globalAiModel == modelToUse) {
-              logger.info(s"Updating global model from '$modelToUse' to fallback '$fallbackModel'")
-              stateManager.updateState(s => s.copy(globalAiModel = fallbackModel))
-            }
-          case Failure(e) =>
-            logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e)
+    // Get model name to use, with priority to preset override, then global model, then first available model
+    val modelToUseOpt: Option[String] = preset.modelOverride
+      .filter(_.nonEmpty)
+      .orElse(Option(state.globalAiModel).filter(_.nonEmpty))
+      .orElse(state.availableModels.headOption.map(_.name).filter(_.nonEmpty))
+
+    // Special handling for Flash model variants
+    val finalModelToUseOpt = modelToUseOpt.map { modelName =>
+      val isFlashVariant = modelName.contains("flash")
+      val modelExists = state.availableModels.exists(_.name == modelName)
+
+      if (isFlashVariant && !modelExists) {
+        // Try to find a suitable Flash model from available models
+        val availableFlashModels = state.availableModels.filter(m => m.name.contains("flash"))
+        if (availableFlashModels.nonEmpty) {
+          logger.info(s"Flash model '$modelName' not found. Using alternative Flash model: '${availableFlashModels.head.name}'")
+          availableFlashModels.head.name
+        } else {
+          // If no Flash models available, use the original model name (will be handled by fallback logic)
+          modelName
         }
       } else {
-        logger.info(s"Setting AI service model to: '$modelToUse' (for category '$currentActiveCat')")
-        Try(aiService.updateModel(modelToUse)) match {
-          case Success(_) =>
-            logger.info(s"Successfully updated AIService model to '$modelToUse'")
-            // Ensure model is saved in state if it's different from current global model
-            if (preset.modelOverride.isEmpty && state.globalAiModel != modelToUse) {
-              logger.info(s"Synchronizing global model with active model: '$modelToUse'")
-              stateManager.updateState(s => s.copy(globalAiModel = modelToUse))
-            }
-          case Failure(e) =>
-            logger.error(s"Failed to update AIService model to '$modelToUse'", e)
-        }
+        modelName
       }
-    case None =>
-      logger.error(s"Failed to determine any AI model to use for category '$currentActiveCat'. AIService model not updated. This can happen if no global model is set and no presets override it, and the available models list is empty.")
-  }
-}
+    }
 
-private def validateInputLength(text: String): Option[String] = {
-  val maxLength = 30000 // Max length for user input text
-  if (text.length > maxLength) {
-    Some(f"Request is too long (${text.length}%,d / $maxLength%,d characters). Please shorten it.") // Translated
-  } else {
-    None
+    finalModelToUseOpt match {
+      case Some(modelToUse) =>
+        // Use new public getter AIService.getCurrentModel
+        logger.info(s"Determined model for AIService: '$modelToUse'. Current AIService model: '${aiService.getCurrentModel}'.")
+
+        // Check if the model exists in available models
+        if (state.availableModels.nonEmpty && !state.availableModels.exists(_.name == modelToUse)) {
+          val fallbackModel = state.availableModels.head.name
+          logger.warn(
+            s"Model '$modelToUse' (determined for category '$currentActiveCat') not found in available models. Falling back to '$fallbackModel'."
+          )
+
+          // Update model in AIService
+          Try(aiService.updateModel(fallbackModel)) match {
+            case Success(_) =>
+              logger.info(s"Successfully updated AIService model to fallback '$fallbackModel'")
+              // If we're using a fallback and the global model doesn't match, update it
+              if (state.globalAiModel == modelToUse) {
+                logger.info(s"Updating global model from '$modelToUse' to fallback '$fallbackModel'")
+                stateManager.updateState(s => s.copy(globalAiModel = fallbackModel))
+              }
+            case Failure(e) =>
+              logger.error(s"Failed to update AIService model to fallback '$fallbackModel'", e)
+          }
+        } else {
+          logger.info(s"Setting AI service model to: '$modelToUse' (for category '$currentActiveCat')")
+          Try(aiService.updateModel(modelToUse)) match {
+            case Success(_) =>
+              logger.info(s"Successfully updated AIService model to '$modelToUse'")
+              // Ensure model is saved in state if it's different from current global model
+              if (preset.modelOverride.isEmpty && state.globalAiModel != modelToUse) {
+                logger.info(s"Synchronizing global model with active model: '$modelToUse'")
+                stateManager.updateState(s => s.copy(globalAiModel = modelToUse))
+              }
+            case Failure(e) =>
+              logger.error(s"Failed to update AIService model to '$modelToUse'", e)
+          }
+        }
+      case None =>
+        logger.error(s"Failed to determine any AI model to use for category '$currentActiveCat'. AIService model not updated. This can happen if no global model is set and no presets override it, and the available models list is empty.")
+    }
   }
-}
+
+  private def validateInputLength(text: String): Option[String] = {
+    val maxLength = 30000 // Max length for user input text
+    if (text.length > maxLength) {
+      Some(f"Request is too long (${text.length}%,d / $maxLength%,d characters). Please shorten it.") // Translated
+    } else {
+      None
+    }
+  }
 }

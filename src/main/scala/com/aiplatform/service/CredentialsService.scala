@@ -96,13 +96,18 @@ object CredentialsService {
       case Success(_) => // Обрабатывает случай Success(None) или Success(Some(""))
         if (logSuccess) logger.info("No API Key found in Preferences (Node: {}).", prefs.name())
         None
-      case Failure(e: SecurityException) => // Обрабатываем SecurityException отдельно, если нужно специфическое логирование
-        logger.error(s"Security exception loading API Key (Node: ${prefs.name()}). Returning None.", e)
-        None
-      case Failure(NonFatal(e)) => // Обрабатываем все остальные не фатальные ошибки
-        logger.error(s"Failed to load API Key (Node: ${prefs.name()}). Returning None.", e)
-        None
-      // --- ИЗМЕНЕНИЕ КОНЕЦ ---
+      case Failure(e) => // Catch all failures
+        e match {
+          case se: SecurityException =>
+            logger.error(s"Security exception loading API Key (Node: ${prefs.name()}). Returning None.", se)
+            None
+          case NonFatal(nf) =>
+            logger.error(s"Failed to load API Key (Node: ${prefs.name()}). Returning None.", nf)
+            None
+          case fatal => // Should ideally not happen with Preferences API or be caught
+            logger.error(s"Fatal error loading API Key (Node: ${prefs.name()}). Rethrowing.", fatal)
+            throw fatal // Rethrow fatal errors
+        }
     }
   }
 

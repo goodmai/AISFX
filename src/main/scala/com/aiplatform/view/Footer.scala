@@ -216,21 +216,22 @@ class Footer(
 
     // 2. Если текст не вставлен, проверяем ИЗОБРАЖЕНИЕ
     if (clipboard.hasImage) {
-      Try(clipboard.image) match { // clipboard.image возвращает javafx.scene.image.Image
-        case Success(image) if image != null => // Явно проверяем, что image не null
-          logger.info(s"Pasted IMAGE from clipboard (size: ${image.width()}x${image.height()}). Calling onImagePasted callback.")
-          onImagePasted(image) // Вызываем колбэк
-          Platform.runLater {
-            val placeholder = s"\n[Изображение (${image.width()}x${image.height()}) вставлено и будет отправлено с запросом]\n"
-            inputTextArea.insertText(inputTextArea.caretPosition.value, placeholder)
+      Try(clipboard.image) match {
+        case Success(image) => // image is of type javafx.scene.image.Image (nullable)
+          if (image != null) {
+            logger.info(s"Pasted IMAGE from clipboard (size: ${image.width()}x${image.height()}). Calling onImagePasted callback.")
+            onImagePasted(image)
+            Platform.runLater {
+              val placeholder = s"\n[Изображение (${image.width()}x${image.height()}) вставлено и будет отправлено с запросом]\n"
+              inputTextArea.insertText(inputTextArea.caretPosition.value, placeholder)
+            }
+            return // Image processed, exit
+          } else {
+            logger.debug("Clipboard hasImage is true, but clipboard.image returned null.")
           }
-          return // Изображение обработано, выходим
-        case Success(null) => // Обрабатываем случай, когда clipboard.image вернул null
-          logger.debug("Clipboard hasImage is true, but clipboard.image returned null.")
-        case Failure(e) => // Обрабатываем исключение при получении изображения
+        case Failure(e) =>
           logger.warn(s"Error getting IMAGE from clipboard: ${e.getMessage}")
       }
-      // --- ИЗМЕНЕНИЕ КОНЕЦ ---
     }
 
     // 3. Если не текст и не изображение, проверяем ФАЙЛЫ

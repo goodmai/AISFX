@@ -5,14 +5,16 @@ import com.aiplatform.model._
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.matchers.dsl.ResultOfATypeInvocation // For a[Type] syntax
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.UUID
 import org.scalatest.BeforeAndAfterEach // Added for more granular cleanup if needed alongside withFixture
+import scala.util.Success // Ensure Success is imported
 
 class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll {
 
-  private val stateFilePath: Path = Paths.get(StateRepository.STATE_FILE_NAME) // Use constant from StateRepository
+  private val stateFilePath: Path = Paths.get("app_state.json") // Replaced StateRepository.STATE_FILE_NAME
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -55,28 +57,31 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
 
   it should "correctly save and then load a valid AppState" in {
     // Arrange
-    val model1 = ModelInfo("model-1", "Model One Display")
-    val model2 = ModelInfo("model-2", "Model Two Display")
-    val presetD1 = PromptPreset("Default Preset 1", "Prompt for D1: {{INPUT}}", isDefault = true, temperature = 0.7, topP = 0.9, topK = Some(40), maxOutputTokens = Some(256))
-    val presetC1 = PromptPreset("Custom Preset 1", "Prompt for C1: {{INPUT}}", isDefault = false, modelOverride = Some("model-1"))
+    val model1 = ModelInfo(name = "model-1", displayName = "Model One Display", description = None, supportedGenerationMethods = List("generateContent"))
+    val model2 = ModelInfo(name = "model-2", displayName = "Model Two Display", description = None, supportedGenerationMethods = List("generateContent"))
+    // Assuming topK is Int, removed maxOutputTokens
+    val presetD1 = PromptPreset(name = "Default Preset 1", prompt = "Prompt for D1: {{INPUT}}", isDefault = true, temperature = 0.7, topP = 0.9, topK = 40, modelOverride = None)
+    val presetC1 = PromptPreset(name = "Custom Preset 1", prompt = "Prompt for C1: {{INPUT}}", isDefault = false, temperature = 0.5, topP = 1.0, topK = 50, modelOverride = Some("model-1"))
 
-    val time1 = Instant.now().minusSeconds(300)
-    val time2 = time1.plusSeconds(30)
-    val time3 = time1.plusSeconds(60)
-    val time4 = time1.plusSeconds(90)
-    val time5 = time1.plusSeconds(120)
+    val time1 = Instant.now().minusSeconds(300) // Effectively createdAt for topic1 if used that way
+    val time2 = time1.plusSeconds(30) // Dialog1 timestamp
+    val time3 = time1.plusSeconds(60) // Effectively createdAt for topic2
+    val time4 = time1.plusSeconds(90) // Dialog2 timestamp & lastUpdated for topic1
+    val time5 = time1.plusSeconds(120) // Dialog3 timestamp & lastUpdated for topic2 & topic3
 
-    val dialog1 = Dialog("Dialog1", "Request 1", "Response 1", time2, "model-1")
-    val dialog2 = Dialog("Dialog2", "Request 2", "Response 2", time4, "model-1")
-    val dialog3 = Dialog("Dialog3", "Request 3", "Response 3", time5, "model-2")
+    // Corrected Dialog constructor based on compiler error: title, request, response, timestamp, model
+    val dialog1 = Dialog(title = "D1", request = "Request 1", response = "Response 1", timestamp = time2, model = "model-1")
+    val dialog2 = Dialog(title = "D2", request = "Request 2", response = "Response 2", timestamp = time4, model = "model-1")
+    val dialog3 = Dialog(title = "D3", request = "Request 3", response = "Response 3", timestamp = time5, model = "model-2")
 
     val topic1Id = UUID.randomUUID().toString
     val topic2Id = UUID.randomUUID().toString
     val topic3Id = UUID.randomUUID().toString
 
-    val topic1 = Topic(topic1Id, "Research Topic", List(dialog1, dialog2), time1, time4, "Research")
-    val topic2 = Topic(topic2Id, "Coding Topic", List(dialog3), time3, time5, "Code")
-    val topic3 = Topic(topic3Id, "General Topic", List(), time5, time5, "Global")
+    // Corrected Topic constructor: id, title, category, dialogs, lastUpdatedAt
+    val topic1 = Topic(id = topic1Id, title = "Research Topic", category = "Research", dialogs = List(dialog1, dialog2), lastUpdatedAt = time4)
+    val topic2 = Topic(id = topic2Id, title = "Coding Topic", category = "Code", dialogs = List(dialog3), lastUpdatedAt = time5)
+    val topic3 = Topic(id = topic3Id, title = "General Topic", category = "Global", dialogs = List(), lastUpdatedAt = time5)
 
     val appStateToSave = AppState(
       topics = List(topic1, topic2, topic3),
@@ -87,18 +92,18 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       defaultPresets = List(presetD1),
       customPresets = List(presetC1),
       buttonMappings = Map("Research" -> presetD1.name, "Code" -> presetC1.name),
-      fontFamily = "Arial",
-      fontSize = 14
+      fileContext = None // Added fileContext
+      // Removed fontFamily, fontSize
     )
 
     // Act
     val saveResult = StateRepository.saveState(appStateToSave)
-    saveResult shouldBe a[Success[_]]
+    saveResult shouldBe a[scala.util.Success[?]] // Using ? for wildcard
     Files.exists(stateFilePath) shouldBe true
 
     val savedJson = Files.readString(stateFilePath)
     savedJson should include ("\"globalAiModel\":\"model-2\"") // Quick check for content
-    savedJson should include ("\"fontFamily\":\"Arial\"")
+    // savedJson should include ("\"fontFamily\":\"Arial\"") // Removed
     savedJson should include ("Research Topic")
 
     val loadedState = StateRepository.loadState()
@@ -155,7 +160,7 @@ class StateRepositorySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         .filter(_.getFileName.toString.startsWith(s"${stateFilePath.getFileName.toString}.corrupted_"))
         .findFirst()
 
-      backupFileOpt shouldBe defined // A backup file should have been created
+      backupFileOpt.isPresent shouldBe true // A backup file should have been created
       backupFileOpt.ifPresent { backupPath =>
         Files.readString(backupPath) shouldBe corruptedJsonContent // Backup content should match corrupted content
         Files.deleteIfExists(backupPath) // Clean up the specific backup file

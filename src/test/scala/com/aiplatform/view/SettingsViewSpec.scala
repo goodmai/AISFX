@@ -7,7 +7,8 @@ import com.aiplatform.model.{ModelInfo, PromptPreset}
 // import com.aiplatform.service.HistoryService
 // import org.apache.pekko.actor.typed.ActorSystem
 import org.mockito.ArgumentCaptor
-import org.mockito.Mockito.{times, verify, reset => mockReset} // Specific import for reset
+import org.mockito.Mockito._ // Reverting to general import for all static Mockito methods
+import org.mockito.ArgumentMatchers.{any, eq => mockitoEq} // Keep specific alias for eq
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -17,6 +18,10 @@ import scalafx.application.Platform
 import scalafx.embed.swing.SFXPanel
 import scalafx.scene.Parent
 import scalafx.scene.control.{Button => SFXButton, ComboBox => SFXComboBox, ListView => SFXListView, PasswordField => SFXPasswordField, TabPane => SFXTabPane, TextArea => SFXTextArea, TextField => SFXTextField, Spinner => SFXSpinner}
+import scalafx.stage.Stage // Import for Stage
+import scalafx.scene.layout.VBox // Import for VBox
+import scalafx.collections.ObservableBuffer // Import for ObservableBuffer
+import scalafx.Includes._ // Crucial for ScalaFX implicits and conversions
 import javafx.scene.control.{ButtonType => JFXButtonType} // For DialogUtils mocking (if used)
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -142,10 +147,10 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
   val commonInitialSettings: CurrentSettings = CurrentSettings(
     apiKey = "test-key",
     model = "model-1",
-    availableModels = List(ModelInfo("model-1", "Model One"), ModelInfo("model-2", "Model Two")),
+    availableModels = List(ModelInfo(name = "model-1", displayName = "Model One", description = None, supportedGenerationMethods = List("generateContent")), ModelInfo(name = "model-2", displayName = "Model Two", description = None, supportedGenerationMethods = List("generateContent"))),
     buttonMappings = Map("Research" -> "Default Research", "Code" -> "My Coding Preset"),
-    defaultPresets = List(PromptPreset("Default Research", "Research: {{INPUT}}", isDefault = true)),
-    customPresets = List(PromptPreset("My Coding Preset", "Code: {{INPUT}}"))
+    defaultPresets = List(PromptPreset(name = "Default Research", prompt = "Research: {{INPUT}}", isDefault = true, temperature = 0.7, topP=0.9, topK=50, modelOverride=None)),
+    customPresets = List(PromptPreset(name = "My Coding Preset", prompt = "Code: {{INPUT}}", isDefault = false, temperature = 0.7, topP=0.9, topK=50, modelOverride=None))
   )
 
   behavior of "SettingsView - General Tab"
@@ -154,12 +159,13 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
     testSettingsView(commonInitialSettings) { (settingsView, rootNode, stage) =>
       // Arrange: UI elements are obtained via reflection
       val apiKeyField = getPrivateUiField[SFXPasswordField](settingsView, "apiKeyField")
-      val modelComboBox = getPrivateUiField[SFXComboBox[ModelInfo]](settingsView, "globalModelComboBox")
+      val modelComboBox = getPrivateUiField[SFXComboBox[ModelInfo]](settingsView, "globalModelComboBox") // Uses SFXComboBox
       
       // Act: (Display is part of setup)
 
       // Assert
       apiKeyField.text.value shouldBe commonInitialSettings.apiKey
+      // With scalafx.Includes._, selectedItem should work on SFXComboBox's selectionModel
       modelComboBox.selectionModel.value.selectedItem.value.name shouldBe commonInitialSettings.model
     }
   }
@@ -198,15 +204,16 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
   it should "display initial presets correctly and populate editor on selection" in {
     testSettingsView(commonInitialSettings) { (settingsView, rootNode, stage) =>
       // Arrange
-      val defaultListView = getPrivateUiField[SFXListView[PromptPreset]](settingsView, "defaultPresetsListView")
-      val customListView = getPrivateUiField[SFXListView[PromptPreset]](settingsView, "customPresetsListView")
+      val defaultListView = getPrivateUiField[SFXListView[PromptPreset]](settingsView, "defaultPresetsListView") // Uses SFXListView
+      val customListView = getPrivateUiField[SFXListView[PromptPreset]](settingsView, "customPresetsListView") // Uses SFXListView
       val presetNameField = getPrivateUiField[SFXTextField](settingsView, "presetNameField")
       val presetPromptArea = getPrivateUiField[SFXTextArea](settingsView, "presetPromptArea")
-      val presetEditorPane = getPrivateUiField[VBox](settingsView, "presetEditorPane")
+      val presetEditorPane = getPrivateUiField[scalafx.scene.layout.VBox](settingsView, "presetEditorPane") // Explicitly scalafx.scene.layout.VBox
       
       callPrivateMethod(settingsView, "setupPresetSelectionHandling") // Ensure listeners are active
 
       // Assert initial display
+      // With scalafx.Includes._, .items should be SFX ObservableBuffer, then .head should work
       defaultListView.items.value.size shouldBe commonInitialSettings.defaultPresets.size
       customListView.items.value.size shouldBe commonInitialSettings.customPresets.size
       defaultListView.items.value.head.name shouldBe commonInitialSettings.defaultPresets.head.name
@@ -260,7 +267,7 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
       savedPreset.isDefault shouldBe false
       
       // Check if it appears in the custom presets list view (indirectly, by checking buffer)
-      val customPresetsBuffer = getPrivateUiField[ObservableBuffer[PromptPreset]](settingsView, "customPresetsBuffer")
+      val customPresetsBuffer = getPrivateUiField[scalafx.collections.ObservableBuffer[PromptPreset]](settingsView, "customPresetsBuffer") // Explicitly scalafx.collections.ObservableBuffer
       customPresetsBuffer.exists(_.name == newPresetName) shouldBe true
     }
   }
@@ -284,7 +291,7 @@ class SettingsViewSpec extends AnyFlatSpec with Matchers with MockitoSugar with 
 
       // Assert
       verify(mockMainController, times(1)).deleteCustomPreset(mockitoEq(presetToSelect.name))
-      val customPresetsBuffer = getPrivateUiField[ObservableBuffer[PromptPreset]](settingsView, "customPresetsBuffer")
+      val customPresetsBuffer = getPrivateUiField[scalafx.collections.ObservableBuffer[PromptPreset]](settingsView, "customPresetsBuffer") // Explicitly scalafx.collections.ObservableBuffer
       customPresetsBuffer.exists(_.name == presetToSelect.name) shouldBe false
     }
   }

@@ -7,6 +7,9 @@ case class FileTreeContext(
 )
 
 object FileTreeContext {
+  import upickle.default.*
+  implicit val rw: ReadWriter[FileTreeContext] = macroRW
+
   // Companion object for potential future utility methods, e.g., empty context.
   def empty: FileTreeContext = FileTreeContext(List.empty)
 }
